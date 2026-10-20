@@ -1,0 +1,618 @@
+@mode(host.dual)
+
+# Regular-expression translation: POSIX basic and extended regular
+# expressions, as sed reads them, into the PCRE-like syntax that system.regex
+# compiles. system.regex has no case-insensitive flag and no POSIX bracket
+# classes, and treats `( ) { } | + ?` as operators everywhere, so every
+# construct is rewritten explicitly. Copied from loup-cmd-grep and adapted:
+# groups capture (for \1 in replacements), `\t` and friends are control
+# characters, and `.` also matches a newline in the pattern space.
+
+pub const BACKREF_MESSAGE: string = "back-references (\\1 to \\9) in regular expressions are not supported";
+const BRACKET_MESSAGE: string = "Unmatched [, [^, [:, [., or [=";
+
+# Kinds of translated pieces, used to decide what a quantifier or an anchor
+# character means at that point.
+const ATOM: int = 0;        # a literal, `.`, a class or a group: can be repeated
+const QUANTIFIED: int = 1;  # an atom with a quantifier already attached
+const ANCHOR: int = 2;      # ^ $ \b \B
+const OPEN: int = 3;        # the start of a group (also the start of the pattern)
+const ALT: int = 4;         # |
+
+const HEX: string = "0123456789ABCDEF";
+
+pub func code_points(text: string): list[int] {
+    var out: list[int] = [];
+    for (c in text.scalars()) {
+        out.push(c.toInt());
+    }
+    return out;
+}
+
+func code_of(one: string): int {
+    for (c in one.scalars()) {
+        return c.toInt();
+    }
+    return -1;
+}
+
+func is_alnum(c: int): bool {
+    return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122);
+}
+
+func is_punct(c: int): bool {
+    return (c >= 33 and c <= 47) or (c >= 58 and c <= 64) or (c >= 91 and c <= 96) or (c >= 123 and c <= 126);
+}
+
+func hex(n: int): string {
+    if (n < 16) {
+        return HEX.slice(n, n + 1);
+    }
+    return hex(n / 16) + HEX.slice(n % 16, n % 16 + 1);
+}
+
+# One code point in system.regex syntax, inside or outside a class: letters,
+# digits and `_` as themselves (system.regex rejects `\_`), other ASCII
+# punctuation escaped, everything else as \x{HEX}.
+pub func escape_code(c: int): string {
+    if (is_alnum(c) or c == 95) {
+        return str(char.of(c));
+    }
+    if (is_punct(c)) {
+        return "\\" + str(char.of(c));
+    }
+    return "\\x{" + hex(c) + "}";
+}
+
+# The control character for the escape letter `c` of \\n \\t \\r \\f \\v \\a.
+func control_code(c: int): int {
+    if (c == 110) {
+        return 10;
+    }
+    if (c == 116) {
+        return 9;
+    }
+    if (c == 114) {
+        return 13;
+    }
+    if (c == 102) {
+        return 12;
+    }
+    if (c == 118) {
+        return 11;
+    }
+    return 7;
+}
+
+# The other-case form of a code point, or the code point itself.
+pub func other_case(c: int): int {
+    if (c >= 65 and c <= 90) {
+        return c + 32;
+    }
+    if (c >= 97 and c <= 122) {
+        return c - 32;
+    }
+    if (c < 128) {
+        return c;
+    }
+    let s: string = str(char.of(c));
+    let lower = s.toLowerCase();
+    if (lower != s and lower.len() == 1) {
+        return code_of(lower);
+    }
+    let upper = s.toUpperCase();
+    if (upper != s and upper.len() == 1) {
+        return code_of(upper);
+    }
+    return c;
+}
+
+# A literal code point; with `icase`, a class of both cases.
+pub func literal(c: int, icase: bool): string {
+    if (icase) {
+        let o = other_case(c);
+        if (o != c) {
+            return "[" + escape_code(c) + escape_code(o) + "]";
+        }
+    }
+    return escape_code(c);
+}
+
+# The ASCII ranges of a POSIX class as lo,hi pairs, or [] for an unknown name.
+pub func class_ranges(name: string, icase: bool): list[int] {
+    if (name == "alpha") {
+        return [65, 90, 97, 122];
+    }
+    if (name == "digit") {
+        return [48, 57];
+    }
+    if (name == "alnum") {
+        return [48, 57, 65, 90, 97, 122];
+    }
+    if (name == "upper") {
+        return if (icase) { [65, 90, 97, 122] } else { [65, 90] };
+    }
+    if (name == "lower") {
+        return if (icase) { [65, 90, 97, 122] } else { [97, 122] };
+    }
+    if (name == "space") {
+        return [9, 13, 32, 32];
+    }
+    if (name == "blank") {
+        return [9, 9, 32, 32];
+    }
+    if (name == "punct") {
+        return [33, 47, 58, 64, 91, 96, 123, 126];
+    }
+    if (name == "print") {
+        return [32, 126];
+    }
+    if (name == "graph") {
+        return [33, 126];
+    }
+    if (name == "cntrl") {
+        return [0, 31, 127, 127];
+    }
+    if (name == "xdigit") {
+        return [48, 57, 65, 70, 97, 102];
+    }
+    return [];
+}
+
+func range_text(lo: int, hi: int): string {
+    if (lo == hi) {
+        return escape_code(lo);
+    }
+    return escape_code(lo) + "-" + escape_code(hi);
+}
+
+# A class member for the range lo..hi; with `icase`, also the other case of
+# its ASCII letters.
+pub func range_member(lo: int, hi: int, icase: bool): string {
+    var out = range_text(lo, hi);
+    if (!icase) {
+        return out;
+    }
+    if (lo == hi) {
+        let o = other_case(lo);
+        if (o != lo) {
+            out += escape_code(o);
+        }
+        return out;
+    }
+    # Uppercase part, shifted to lowercase, and the other way round.
+    let ulo = if (lo > 65) { lo } else { 65 };
+    let uhi = if (hi < 90) { hi } else { 90 };
+    if (ulo <= uhi) {
+        out += range_text(ulo + 32, uhi + 32);
+    }
+    let llo = if (lo > 97) { lo } else { 97 };
+    let lhi = if (hi < 122) { hi } else { 122 };
+    if (llo <= lhi) {
+        out += range_text(llo - 32, lhi - 32);
+    }
+    return out;
+}
+
+# `{m}`, `{m,}`, `{m,n}` or `{,n}` contents as [min, max] (max -1: no
+# limit), or [] when malformed.
+pub func parse_interval(content: list[int]): list[int] {
+    var lo = -1;
+    var hi = -1;
+    var seen_comma = false;
+    var digits = 0;
+    for (c in content) {
+        if (c >= 48 and c <= 57) {
+            let d = c - 48;
+            if (seen_comma) {
+                hi = if (hi < 0) { d } else { hi * 10 + d };
+            } else {
+                lo = if (lo < 0) { d } else { lo * 10 + d };
+            }
+            digits += 1;
+            if (lo > 100000 or hi > 100000) {
+                return [100001, 100001];
+            }
+        } else if (c == 44 and !seen_comma) {
+            seen_comma = true;
+        } else {
+            return [];
+        }
+    }
+    if (digits == 0 and !seen_comma) {
+        return [];
+    }
+    if (lo < 0) {
+        lo = 0;
+    }
+    if (!seen_comma) {
+        hi = lo;
+    }
+    return [lo, hi];
+}
+
+# Builds the translation of one BRE or ERE as a list of pieces.
+class Translator {
+    let codes: list[int];
+    let ere: bool;
+    let icase: bool;
+    var pos: int = 0;
+    var pieces: list[string] = [];
+    var kinds: list[int] = [];
+    var opens: list[int] = [];
+    pub var groups: int = 0;
+    pub var err: string = "";
+
+    new(pattern: string, ere: bool, icase: bool) {
+        this.codes = code_points(pattern);
+        this.ere = ere;
+        this.icase = icase;
+    }
+
+    func at_end(): bool {
+        return this.pos >= this.codes.len();
+    }
+
+    func peek(ahead: int): int {
+        let i = this.pos + ahead;
+        if (i < this.codes.len()) {
+            return this.codes[i];
+        }
+        return -1;
+    }
+
+    # The kind of the last piece; the start of the pattern counts as OPEN.
+    func last_kind(): int {
+        if (this.kinds.len() == 0) {
+            return OPEN;
+        }
+        return this.kinds[this.kinds.len() - 1];
+    }
+
+    modifier func add(piece: string, kind: int): void {
+        this.pieces.push(piece);
+        this.kinds.push(kind);
+    }
+
+    modifier func fail(message: string): void {
+        if (this.err == "") {
+            this.err = message;
+        }
+    }
+
+    func can_repeat(): bool {
+        let k = this.last_kind();
+        return k == ATOM or k == QUANTIFIED;
+    }
+
+    # Attaches quantifier `q` to the last piece. A piece that already has a
+    # quantifier is wrapped first, so `a*?` stays greedy and `a**` compiles.
+    modifier func quantify(q: string): void {
+        let last = this.pieces.len() - 1;
+        if (this.kinds[last] == QUANTIFIED) {
+            this.pieces[last] = "(?:" + this.pieces[last] + ")" + q;
+        } else {
+            this.pieces[last] = this.pieces[last] + q;
+        }
+        this.kinds[last] = QUANTIFIED;
+    }
+
+    # `*`, `+` or `?` (code `c`). With nothing to repeat it is a literal in a
+    # BRE and ignored in an ERE, as in GNU grep.
+    modifier func repeat(c: int): void {
+        if (this.can_repeat()) {
+            this.quantify(str(char.of(c)));
+        } else if (!this.ere) {
+            this.add(literal(c, false), ATOM);
+        }
+    }
+
+    modifier func open_group(): void {
+        this.opens.push(this.pieces.len());
+        this.groups += 1;
+        this.add("(", OPEN);
+    }
+
+    # Collapses the open group into one capturing atom.
+    modifier func close_group(): void {
+        let start = this.opens.pop();
+        var inner = "";
+        var i = start + 1;
+        while (i < this.pieces.len()) {
+            inner += this.pieces[i];
+            i += 1;
+        }
+        while (this.pieces.len() > start) {
+            this.pieces.pop();
+            this.kinds.pop();
+        }
+        this.add("(" + inner + ")", ATOM);
+    }
+
+    # Applies an interval [min, max] to the last piece.
+    modifier func interval(bounds: list[int]): void {
+        let lo = bounds[0];
+        let hi = bounds[1];
+        if (lo > 32767 or hi > 32767) {
+            this.fail("Regular expression too big");
+            return;
+        }
+        if (hi >= 0 and lo > hi) {
+            this.fail("Invalid content of \\{\\}");
+            return;
+        }
+        var q = "{" + str(lo);
+        if (hi < 0) {
+            q += ",}";
+        } else if (hi != lo) {
+            q += "," + str(hi) + "}";
+        } else {
+            q += "}";
+        }
+        this.quantify(q);
+    }
+
+    # The code points from `pos` up to the interval's closing `}` (ERE) or
+    # `\}` (BRE); moves `pos` past it. [-1] when there is no closing.
+    modifier func interval_content(): list[int] {
+        var content: list[int] = [];
+        var i = this.pos;
+        while (i < this.codes.len()) {
+            let c = this.codes[i];
+            if (this.ere and c == 125) {
+                this.pos = i + 1;
+                return content;
+            }
+            if (!this.ere and c == 92 and i + 1 < this.codes.len() and this.codes[i + 1] == 125) {
+                this.pos = i + 2;
+                return content;
+            }
+            content.push(c);
+            i += 1;
+        }
+        return [-1];
+    }
+
+    # After `{` in an ERE: an interval, or a literal `{` when malformed.
+    modifier func ere_brace(): void {
+        let save = this.pos;
+        let content = this.interval_content();
+        let bounds = if (content.len() == 1 and content[0] == -1) { [] } else { parse_interval(content) };
+        if (bounds.len() == 0) {
+            this.pos = save;
+            this.add(literal(123, false), ATOM);
+            return;
+        }
+        if (this.can_repeat()) {
+            this.interval(bounds);
+        }
+    }
+
+    # After `\{` in a BRE.
+    modifier func bre_brace(): void {
+        let content = this.interval_content();
+        if (content.len() == 1 and content[0] == -1) {
+            this.fail("Unmatched \\{");
+            return;
+        }
+        let bounds = parse_interval(content);
+        if (bounds.len() == 0) {
+            this.fail("Invalid content of \\{\\}");
+            return;
+        }
+        if (!this.can_repeat()) {
+            this.fail("Invalid preceding regular expression");
+            return;
+        }
+        this.interval(bounds);
+    }
+
+    modifier func caret(): void {
+        let k = this.last_kind();
+        if (this.ere or k == OPEN or k == ALT) {
+            this.add("^", ANCHOR);
+        } else {
+            this.add(literal(94, false), ATOM);
+        }
+    }
+
+    modifier func dollar(): void {
+        let next = this.peek(0);
+        let next2 = this.peek(1);
+        let at_end = next < 0 or (next == 92 and (next2 == 41 or next2 == 124));
+        if (this.ere or at_end) {
+            this.add("$", ANCHOR);
+        } else {
+            this.add(literal(36, false), ATOM);
+        }
+    }
+
+    modifier func backslash(): void {
+        if (this.at_end()) {
+            this.fail("Trailing backslash");
+            return;
+        }
+        let c = this.codes[this.pos];
+        this.pos += 1;
+        if (!this.ere and c == 40) {
+            this.open_group();
+        } else if (!this.ere and c == 41) {
+            if (this.opens.len() == 0) {
+                this.fail("Unmatched ) or \\)");
+            } else {
+                this.close_group();
+            }
+        } else if (!this.ere and c == 124) {
+            this.add("|", ALT);
+        } else if (!this.ere and c == 123) {
+            this.bre_brace();
+        } else if (!this.ere and (c == 43 or c == 63)) {
+            this.repeat(c);
+        } else if (c >= 49 and c <= 57) {
+            this.fail(BACKREF_MESSAGE);
+        } else if (c == 60 or c == 62 or c == 98) {
+            this.add("\\b", ANCHOR);
+        } else if (c == 66) {
+            this.add("\\B", ANCHOR);
+        } else if (c == 119 or c == 87 or c == 115 or c == 83) {
+            this.add("\\" + str(char.of(c)), ATOM);
+        } else if (c == 110 or c == 116 or c == 114 or c == 102 or c == 118 or c == 97) {
+            this.add(escape_code(control_code(c)), ATOM);
+        } else if (c == 96) {
+            this.add("^", ANCHOR);
+        } else if (c == 39) {
+            this.add("$", ANCHOR);
+        } else {
+            this.add(literal(c, this.icase), ATOM);
+        }
+    }
+
+    # A bracket expression; `pos` is just after the `[`.
+    modifier func bracket(): void {
+        var negate = false;
+        if (this.peek(0) == 94) {
+            negate = true;
+            this.pos += 1;
+        }
+        let start = this.pos;
+        var members = "";
+        var first = true;
+        while (true) {
+            if (this.at_end()) {
+                this.fail(BRACKET_MESSAGE);
+                return;
+            }
+            let c = this.codes[this.pos];
+            if (c == 93 and !first) {
+                break;
+            }
+            first = false;
+            var lo = c;
+            let kind = this.peek(1);
+            if (c == 91 and (kind == 58 or kind == 61 or kind == 46)) {
+                # [:name:], [=c=] or [.c.]
+                var name: list[int] = [];
+                var i = this.pos + 2;
+                var closed = false;
+                while (i + 1 < this.codes.len()) {
+                    if (this.codes[i] == kind and this.codes[i + 1] == 93) {
+                        closed = true;
+                        break;
+                    }
+                    name.push(this.codes[i]);
+                    i += 1;
+                }
+                if (!closed) {
+                    this.fail(BRACKET_MESSAGE);
+                    return;
+                }
+                this.pos = i + 2;
+                if (kind == 58) {
+                    var text = "";
+                    for (n in name) {
+                        text += str(char.of(n));
+                    }
+                    let ranges = class_ranges(text, this.icase);
+                    if (ranges.len() == 0) {
+                        this.fail("Invalid character class name");
+                        return;
+                    }
+                    var r = 0;
+                    while (r < ranges.len()) {
+                        members += range_text(ranges[r], ranges[r + 1]);
+                        r += 2;
+                    }
+                    continue;
+                }
+                if (name.len() != 1) {
+                    this.fail("Invalid collation character");
+                    return;
+                }
+                lo = name[0];
+            } else {
+                this.pos += 1;
+            }
+            # A range lo-hi (a `-` just before the closing `]` is literal).
+            if (this.peek(0) == 45 and this.peek(1) >= 0 and this.peek(1) != 93) {
+                let hi = this.peek(1);
+                this.pos += 2;
+                if (hi < lo) {
+                    this.fail("Invalid range end");
+                    return;
+                }
+                members += range_member(lo, hi, this.icase);
+            } else {
+                members += range_member(lo, lo, this.icase);
+            }
+        }
+        let content_end = this.pos;
+        this.pos += 1;
+        # GNU rejects [:space:] written without the outer brackets.
+        if (!negate and content_end - start >= 3 and this.codes[start] == 58 and this.codes[content_end - 1] == 58) {
+            this.fail("character class syntax is [[:space:]], not [:space:]");
+            return;
+        }
+        let neg = if (negate) { "^" } else { "" };
+        this.add("[" + neg + members + "]", ATOM);
+    }
+
+    pub modifier func run(): string {
+        while (this.err == "" and !this.at_end()) {
+            let c = this.codes[this.pos];
+            this.pos += 1;
+            if (c == 92) {
+                this.backslash();
+            } else if (c == 91) {
+                this.bracket();
+            } else if (c == 46) {
+                this.add("[\\s\\S]", ATOM);
+            } else if (c == 42) {
+                this.repeat(c);
+            } else if (c == 94) {
+                this.caret();
+            } else if (c == 36) {
+                this.dollar();
+            } else if (this.ere and c == 40) {
+                this.open_group();
+            } else if (this.ere and c == 41 and this.opens.len() > 0) {
+                this.close_group();
+            } else if (this.ere and c == 124) {
+                this.add("|", ALT);
+            } else if (this.ere and (c == 43 or c == 63)) {
+                this.repeat(c);
+            } else if (this.ere and c == 123) {
+                this.ere_brace();
+            } else {
+                this.add(literal(c, this.icase), ATOM);
+            }
+        }
+        if (this.err == "" and this.opens.len() > 0) {
+            this.fail("Unmatched ( or \\(");
+        }
+        return this.pieces.join("");
+    }
+}
+
+# A translated regular expression and its number of capturing groups.
+pub class Translated {
+    pub let source: string;
+    pub let groups: int;
+
+    new(source: string, groups: int) {
+        this.source = source;
+        this.groups = groups;
+    }
+}
+
+# One sed regular expression in system.regex syntax, or GNU's error message.
+pub func translate(pattern: string, extended: bool, icase: bool): Result[Translated, string] {
+    let t = Translator(pattern, extended, icase);
+    var out = "";
+    safe {
+        out = t.run();
+    }
+    if (t.err != "") {
+        return Err(t.err);
+    }
+    return Ok(Translated(out, t.groups));
+}

@@ -1,0 +1,88 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.lexer import (Source, Cursor);
+
+func cursor(text: string): Cursor {
+    return Cursor([Source(text, "", 1)]);
+}
+
+func test_peek_next_back(): void {
+    let c = cursor("ab");
+    expectEq(c.peek(), "a", "peek");
+    safe {
+        expectEq(c.next(), "a", "next");
+        expectEq(c.next(), "b", "second");
+        expectEq(c.next(), "", "end");
+        c.back();
+    }
+    expectEq(c.peek(), "b", "back");
+}
+
+func test_pieces_are_joined_by_newlines(): void {
+    let c = Cursor([Source("p", "", 1), Source("d", "", 2)]);
+    var seen = "";
+    safe {
+        while (!c.at_end()) {
+            seen += c.next();
+        }
+    }
+    expectEq(seen, "p\nd", "joined");
+}
+
+func test_locations(): void {
+    let c = Cursor([Source("p", "", 1), Source("xk", "", 2)]);
+    expectEq(c.location(), "-e expression #1, char 0", "start");
+    safe {
+        c.next();
+        c.next();
+        c.next();
+        c.next();
+    }
+    expectEq(c.location(), "-e expression #2, char 2", "second piece");
+    let f = Cursor([Source("p\n\nk", "s.sed", 0)]);
+    safe {
+        f.next();
+        f.next();
+        f.next();
+        f.next();
+    }
+    expectEq(f.location(), "file s.sed line 3", "file line");
+}
+
+func test_numbers_and_blanks(): void {
+    let c = cursor("  42x");
+    safe {
+        c.skip_blanks();
+        expectEq(c.number(), 42, "number");
+        expectEq(c.number(), -1, "no digits");
+    }
+    expectEq(c.peek(), "x", "stops at x");
+}
+
+func test_delimited_strings(): void {
+    let c = cursor("a\\/b/rest");
+    safe {
+        expectEq(c.delimited("/", true).unwrap(), "a/b", "escaped delimiter");
+    }
+    let n = cursor("x\\ny\\.z/");
+    safe {
+        expectEq(n.delimited("/", true).unwrap(), "x\ny\\.z", "\\n in a regex, other escapes kept");
+    }
+    let r = cursor("x\\ny/");
+    safe {
+        expectEq(r.delimited("/", false).unwrap(), "x\\ny", "\\n kept in a replacement");
+    }
+    let b = cursor("[/]x/");
+    safe {
+        expectEq(b.delimited("/", true).unwrap(), "[/]x", "delimiter inside brackets");
+    }
+    let u = cursor("abc");
+    safe {
+        expect(u.delimited("/", true).is_none(), "unterminated");
+    }
+    let nl = cursor("ab\nc/");
+    safe {
+        expect(nl.delimited("/", true).is_none(), "a newline ends it");
+    }
+}

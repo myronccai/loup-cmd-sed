@@ -1,25 +1,28 @@
 @mode(host.dual)
 
 # Exit statuses of the whole command line. These tests print the program's
-# normal output and error messages.
+# normal output and messages.
 
 from debug.assert import (expectEq);
-from appinfo import (EXIT_OK, EXIT_USAGE);
+from appinfo import (EXIT_OK, EXIT_BAD_USAGE, EXIT_BAD_INPUT, EXIT_PANIC);
 from cli.app import (run);
 
-func test_version_succeeds(): void {
+func test_version_and_help_succeed(): void {
     expectEq(run(["--version"]), EXIT_OK, "--version");
+    expectEq(run(["--help"]), EXIT_OK, "--help");
 }
 
-func test_hello_succeeds(): void {
-    expectEq(run(["hello", "tests"]), EXIT_OK, "hello NAME");
+func test_runs_a_script(): void {
+    expectEq(run(["-n", "1p", "tests/fixtures/lines.txt"]), EXIT_OK, "1p");
+    expectEq(run(["2q7", "tests/fixtures/lines.txt"]), 7, "q status");
 }
 
-func test_unknown_command_is_usage_error(): void {
-    expectEq(run(["bogus"]), EXIT_USAGE, "unknown command");
-}
-
-func test_missing_command_is_usage_error(): void {
+func test_errors(): void {
     let none: list[string] = [];
-    expectEq(run(none), EXIT_USAGE, "no command");
+    expectEq(run(none), EXIT_BAD_USAGE, "no script");
+    expectEq(run(["-k", "p"]), EXIT_BAD_USAGE, "bad option");
+    expectEq(run(["k", "tests/fixtures/lines.txt"]), EXIT_BAD_USAGE, "bad script");
+    expectEq(run(["-n", "p", "tests/no-such-file"]), EXIT_BAD_INPUT, "missing file");
+    expectEq(run(["-f", "tests/no-such-file", "x"]), EXIT_PANIC, "missing script file");
+    expectEq(run(["-i", "p"]), EXIT_PANIC, "-i without files");
 }

@@ -1,0 +1,235 @@
+@mode(host.dual)
+
+# The lexer of the sed script language: a cursor over the characters of the
+# script pieces (-e texts and -f files), read as one stream with a newline
+# between pieces, as GNU sed does. It knows, for every position, which piece
+# and which character or line of it was last consumed, which gives GNU's
+# error locations, and it reads the delimited arguments of `/RE/`, `s` and
+# `y`.
+
+# One piece of the script: an -e text (`file` empty, `number` = its -e
+# expression number) or the contents of an -f file.
+pub class Source {
+    pub let text: string;
+    pub let file: string;
+    pub let number: int;
+
+    new(text: string, file: string, number: int) {
+        this.text = text;
+        this.file = file;
+        this.number = number;
+    }
+}
+
+pub class Cursor {
+    let chars: list[string];
+    let piece_of: list[int];   # piece index of each character
+    let column_of: list[int];  # 1-based character number within its piece
+    let line_of: list[int];    # 1-based line number within its piece
+    let sources: list[Source];
+    pub var pos: int = 0;      # characters consumed so far
+
+    new(sources: list[Source]) {
+        this.sources = sources;
+        this.chars = [];
+        this.piece_of = [];
+        this.column_of = [];
+        this.line_of = [];
+        var p = 0;
+        while (p < sources.len()) {
+            var column = 0;
+            var line = 1;
+            for (ch in sources[p].text) {
+                column += 1;
+                this.chars.push(ch);
+                this.piece_of.push(p);
+                this.column_of.push(column);
+                this.line_of.push(line);
+                if (ch == "\n") {
+                    line += 1;
+                }
+            }
+            if (p + 1 < sources.len()) {
+                # The newline that joins two pieces counts as the end of the
+                # first one.
+                this.chars.push("\n");
+                this.piece_of.push(p);
+                this.column_of.push(column);
+                this.line_of.push(line);
+            }
+            p += 1;
+        }
+    }
+
+    pub func at_end(): bool {
+        return this.pos >= this.chars.len();
+    }
+
+    # The next character, or "" at the end of the script.
+    pub func peek(): string {
+        if (this.pos < this.chars.len()) {
+            return this.chars[this.pos];
+        }
+        return "";
+    }
+
+    # The character after the next one, or "".
+    pub func peek2(): string {
+        if (this.pos + 1 < this.chars.len()) {
+            return this.chars[this.pos + 1];
+        }
+        return "";
+    }
+
+    # Consumes and returns the next character, or "" at the end.
+    pub modifier func next(): string {
+        if (this.pos < this.chars.len()) {
+            this.pos += 1;
+            return this.chars[this.pos - 1];
+        }
+        return "";
+    }
+
+    pub modifier func back(): void {
+        if (this.pos > 0) {
+            this.pos -= 1;
+        }
+    }
+
+    # Skips spaces and tabs.
+    pub modifier func skip_blanks(): void {
+        while (this.peek() == " " or this.peek() == "\t") {
+            this.pos += 1;
+        }
+    }
+
+    # Skips blanks, newlines and `;` between commands.
+    pub modifier func skip_separators(): void {
+        while (this.peek() == " " or this.peek() == "\t" or this.peek() == "\n" or this.peek() == ";") {
+            this.pos += 1;
+        }
+    }
+
+    # Consumes a run of digits; -1 when there is none.
+    pub modifier func number(): int {
+        let digits = "0123456789";
+        var n = -1;
+        while (this.peek() != "" and digits.index_of(this.peek()) >= 0) {
+            let d = digits.index_of(this.next());
+            n = if (n < 0) { d } else { n * 10 + d };
+            if (n > 1000000000) {
+                n = 1000000000;
+            }
+        }
+        return n;
+    }
+
+    # GNU's location of the last consumed character: `-e expression #N,
+    # char C` or `file F line L`.
+    pub func location(): string {
+        if (this.pos == 0 or this.chars.len() == 0) {
+            return this.location_in(0, 0, 1);
+        }
+        let i = this.pos - 1;
+        return this.location_in(this.piece_of[i], this.column_of[i], this.line_of[i]);
+    }
+
+    # The location of piece `piece` with character number 0, which GNU uses
+    # for an unmatched `{`.
+    pub func location_of_piece(at: int): string {
+        if (this.chars.len() == 0) {
+            return this.location_in(0, 0, 1);
+        }
+        let i = if (at < this.chars.len()) { at } else { this.chars.len() - 1 };
+        return this.location_in(this.piece_of[i], 0, this.line_of[i]);
+    }
+
+    func location_in(piece: int, column: int, line: int): string {
+        if (this.sources.len() == 0) {
+            return "-e expression #1, char 0";
+        }
+        let src = this.sources[piece];
+        if (src.file != "") {
+            return "file " + src.file + " line " + str(line);
+        }
+        return "-e expression #" + str(src.number) + ", char " + str(column);
+    }
+
+    # Reads up to the unescaped `delim` and consumes it. `\DELIM` becomes
+    # DELIM; in a regex `\n` becomes a newline and a bracket expression may
+    # contain the delimiter; other escapes are kept for the next stage.
+    # None when the script ends or a line ends first.
+    pub modifier func delimited(delim: string, regex: bool): Option[string] {
+        var out = "";
+        while (true) {
+            let c = this.next();
+            if (c == "" or c == "\n") {
+                return None;
+            }
+            if (c == delim) {
+                return Some(out);
+            }
+            if (c == "\\") {
+                let d = this.next();
+                if (d == "") {
+                    return None;
+                }
+                if (d == delim) {
+                    out += d;
+                } else if (d == "n" and regex) {
+                    out += "\n";
+                } else {
+                    out += "\\" + d;
+                }
+            } else if (c == "[" and regex) {
+                let inner = this.bracket();
+                if (inner.is_none()) {
+                    return None;
+                }
+                out += "[" + inner.unwrap();
+            } else {
+                out += c;
+            }
+        }
+        return None;
+    }
+
+    # The rest of a bracket expression after its `[`, through the closing
+    # `]`, unchanged.
+    modifier func bracket(): Option[string] {
+        var out = "";
+        if (this.peek() == "^") {
+            out += this.next();
+        }
+        if (this.peek() == "]") {
+            out += this.next();
+        }
+        while (true) {
+            let c = this.next();
+            if (c == "" or c == "\n") {
+                return None;
+            }
+            out += c;
+            if (c == "]") {
+                return Some(out);
+            }
+            let k = this.peek();
+            if (c == "[" and (k == ":" or k == "=" or k == ".")) {
+                out += this.next();
+                # Through the matching `:]`, `=]` or `.]`.
+                while (true) {
+                    let d = this.next();
+                    if (d == "" or d == "\n") {
+                        return None;
+                    }
+                    out += d;
+                    if (d == k and this.peek() == "]") {
+                        out += this.next();
+                        break;
+                    }
+                }
+            }
+        }
+        return None;
+    }
+}

@@ -1,0 +1,108 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.lexer import (Source);
+from commands.parser import (parse_script);
+from commands.machine import (Machine, Input);
+
+# Runs `script` on `text` (one input) and returns the output.
+func sed(script: string, text: string, quiet: bool): string {
+    let m = run_machine(script, text, quiet);
+    return m.output();
+}
+
+func run_machine(script: string, text: string, quiet: bool): Machine {
+    let program = parse_script([Source(script, "", 1)], false).unwrap();
+    let input = Input();
+    safe {
+        input.add_text(text);
+    }
+    let m = Machine(program, quiet or program.quiet);
+    safe {
+        m.run(input);
+    }
+    return m;
+}
+
+func test_input_lines(): void {
+    let input = Input();
+    safe {
+        input.add_text("a\nb");
+        input.add_text("c\n");
+    }
+    expectEq(input.lines.join(","), "a,b,c", "lines");
+    expect(input.complete[0] and !input.complete[1] and input.complete[2], "newline flags");
+}
+
+func test_autoprint_and_quiet(): void {
+    expectEq(sed("p", "a\nb\n", false), "a\na\nb\nb\n", "p plus autoprint");
+    expectEq(sed("p", "a\nb\n", true), "a\nb\n", "-n");
+    expectEq(sed("#n\np", "a\n", false), "a\n", "#n");
+}
+
+func test_delete_and_line_numbers(): void {
+    expectEq(sed("2d", "1\n2\n3\n", false), "1\n3\n", "d");
+    expectEq(sed("$=", "x\ny\n", true), "2\n", "$=");
+    expectEq(sed("$!d", "1\n2\n3\n", false), "3\n", "$!d");
+}
+
+func test_ranges(): void {
+    let lines = "1\n2\n3\n4\n5\n6\n";
+    expectEq(sed("2,4p", lines, true), "2\n3\n4\n", "line range");
+    expectEq(sed("4,2p", lines, true), "4\n", "end before start");
+    expectEq(sed("/2/,/4/p", lines, true), "2\n3\n4\n", "regex range");
+    expectEq(sed("/[24]/,/[0-9]/p", lines, true), "2\n3\n4\n5\n", "range restarts");
+    expectEq(sed("2,4!p", lines, true), "1\n5\n6\n", "negated range");
+    expectEq(sed("5,$p", lines, true), "5\n6\n", "to the last line");
+}
+
+func test_blocks(): void {
+    expectEq(sed("2,5{/3/,/4/d}", "1\n2\n3\n4\n5\n6\n", false), "1\n2\n5\n6\n", "nested range in a block");
+    expectEq(sed("/1/{/2/!p}", "1\n12\n2\n", true), "1\n", "block with negation");
+}
+
+func test_substitution(): void {
+    expectEq(sed("s/o/0/", "foo boo\n", false), "f0o boo\n", "first");
+    expectEq(sed("s/o/0/g", "foo boo\n", false), "f00 b00\n", "global");
+    expectEq(sed("s/o/0/3", "foo boo\n", false), "foo b0o\n", "third");
+    expectEq(sed("s/o/0/2g", "foo boo\n", false), "fo0 b00\n", "second and later");
+    expectEq(sed("s/a*/x/g", "baaac\n", false), "xbxcx\n", "empty matches");
+    expectEq(sed("s/\\(\\w*\\) \\(\\w*\\)/\\2 \\1/", "one two\n", false), "two one\n", "groups");
+    expectEq(sed("s/o/[&]/g", "foo\n", false), "f[o][o]\n", "&");
+    expectEq(sed("s/ /\\n/", "a b\n", false), "a\nb\n", "newline in replacement");
+    expectEq(sed("s/x/y/p", "x\nz\n", true), "y\n", "p flag");
+    expectEq(sed("s/HELLO/hi/I", "Hello\n", false), "hi\n", "I flag");
+    expectEq(sed("/o/s//0/g", "foo\n", false), "f00\n", "empty regex reuses the last one");
+}
+
+func test_transliterate(): void {
+    expectEq(sed("y/abc/xyz/", "aabbcc\n", false), "xxyyzz\n", "y");
+}
+
+func test_text_commands(): void {
+    expectEq(sed("1a\\\nA", "1\n2\n", false), "1\nA\n2\n", "append");
+    expectEq(sed("2i I", "1\n2\n", false), "1\nI\n2\n", "insert");
+    expectEq(sed("2c C", "1\n2\n3\n", false), "1\nC\n3\n", "change one line");
+    expectEq(sed("1,2c C", "1\n2\n3\n", false), "C\n3\n", "change a range once");
+    expectEq(sed("1,2!c C", "1\n2\n3\n4\n", false), "1\n2\nC\nC\n", "negated change: every line");
+    expectEq(sed("1{a X\nd}", "1\n2\n", false), "X\n2\n", "append survives d");
+}
+
+func test_quit(): void {
+    let m = run_machine("2q5", "1\n2\n3\n", false);
+    expectEq(m.output(), "1\n2\n", "stops after line 2");
+    expectEq(m.exit_code, 5, "status");
+    expectEq(sed("2q;a after", "1\n2\n3\n", false), "1\nafter\n2\n", "q prints appended text");
+}
+
+func test_missing_final_newline(): void {
+    expectEq(sed("p", "a\nb", false), "a\na\nb\nb", "kept missing");
+    expectEq(sed("$a end", "a", false), "a\nend\n", "added back before more output");
+    expectEq(sed("=", "a", true), "1\n", "line number");
+}
+
+func test_no_previous_regex_at_run_time(): void {
+    let m = run_machine("//p", "x\n", true);
+    expectEq(m.error, "-e expression #1, char 0: no previous regular expression", "message");
+    expectEq(m.exit_code, 1, "status");
+}

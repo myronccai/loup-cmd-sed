@@ -1,12 +1,17 @@
-# template Loup commandline application
+# loup-cmd-sed
 
-A GitHub template for a command-line application written in
-[Loup](https://code-craft.ai/references/loup). It includes argument parsing,
-command dispatch, a sample `hello` command, tests, a native build and a CI
-workflow.
+GNU `sed` recreated in [Loup](https://code-craft.ai/references/loup): a stream
+editor with the core of the sed language (addresses, ranges, `!`, `{ }`
+blocks, `s y d p q = a i c`), `-n`, `-e`, `-f`, `-E` and in-place editing with
+`-i`.
 
-After creating a repository from this template, work through
-[REPOSITORY_TODOS.md](REPOSITORY_TODOS.md).
+Part of the **loup-cmd** series of example applications: classic Linux and
+Windows commands, and projects for each Loup execution mode, each in its own
+repository under [myronccai](https://github.com/myronccai?tab=repositories&q=loup-cmd).
+This one is `host.dual` Loup built as a native binary. It is a small language
+implementation: a lexer and parser turn the script into enums and classes,
+and an interpreter loop runs them over the pattern space. Regular expressions
+are POSIX BRE/ERE translated into the standard library's `system.regex`.
 
 ## Requirements
 
@@ -14,70 +19,131 @@ After creating a repository from this template, work through
 
   ```sh
   curl -fsSL https://github.com/code-craft-ai-company/loup-releases/releases/latest/download/loup-install.sh | sh
-  loup --version
   ```
 
-- `make`
-- `clang` 17 or later for native builds. Native builds are supported on Linux
-  x86-64 and arm64, and are a preview on macOS and Windows.
+- `make`, and `clang` 17 or later for the native build.
 
 ## Usage
 
 ```sh
-make run ARGS="--help"            # run from source
-make run ARGS="hello Ann --shout"
-make check                        # type-check the program
-make test                         # run the tests in tests/
-make build                        # native binary: build/myapp
-make ci                           # check, test, build and smoke-test the binary
-make clean
+make build                            # native binary: build/sed
+make ci                               # check, unit tests, build, end-to-end tests
+make run ARGS="-n 2p README.md"       # run from source with loup run
 ```
 
 ```text
-$ build/myapp --help
-usage: myapp [OPTIONS] COMMAND [ARGS...]
-
-A command-line application written in Loup.
-
-Commands:
-  hello [NAME]          Print a greeting (NAME defaults to 'world')
-  help                  Show this help
-
-Options:
-  -g, --greeting TEXT   Greeting used by 'hello' (default: Hello)
-      --shout           Print the greeting in upper case
-  -v, --verbose         Print diagnostic messages to stderr
-  -h, --help            Show this help and exit
-  -V, --version         Show the version and exit
+$ build/sed -n '2,3p' tests/fixtures/text.txt
+foo bar
+baz qux
+$ build/sed 's/o/0/g' tests/fixtures/lines.txt
+0ne
+tw0
+three
+$ build/sed -E 's/([a-z]+) ([a-z]+)/\2 \1/' tests/fixtures/text.txt
+world hello
+bar foo
+qux baz
+Hagain ello
+line last
+$ build/sed -n '/^hello/I{=;p}' tests/fixtures/text.txt
+1
+hello world
+4
+Hello again
+$ build/sed '2i\
+-- inserted --' tests/fixtures/lines.txt
+one
+-- inserted --
+two
+three
+$ build/sed '1,2c\
+(first two lines)' tests/fixtures/lines.txt
+(first two lines)
+three
+$ build/sed '$!d;y/abc/ABC/' tests/fixtures/text.txt
+lAst line
+$ build/sed -i.bak 's/^y=.*/y=3/' config.txt; cat config.txt config.txt.bak
+x=1
+y=3
+x=1
+y=2
+$ build/sed 's/a/b' tests/fixtures/lines.txt; echo "exit $?"
+sed: -e expression #1, char 5: unterminated `s' command
+exit 1
+$ build/sed --version
+sed (loup-cmd-sed) 0.1.0
 ```
 
-Exit status: `0` success, `1` runtime failure, `2` usage error.
+`sed [OPTION]... {script-only-if-no-other-script} [input-file]...`
+
+| Option | Meaning |
+|---|---|
+| `-n`, `--quiet`, `--silent` | do not print the pattern space at the end of each cycle |
+| `-e SCRIPT`, `--expression` | add SCRIPT (repeatable; pieces are joined with newlines) |
+| `-f FILE`, `--file` | add the script in FILE (`-` for standard input) |
+| `-E`, `-r`, `--regexp-extended` | extended regular expressions |
+| `-i[SUFFIX]`, `--in-place[=SUFFIX]` | edit files in place, keeping FILE+SUFFIX as a backup (`*` in SUFFIX stands for the file name) |
+| `--help`, `--version` | help text, version line |
+
+Script language:
+
+| Element | Meaning |
+|---|---|
+| `N`, `$`, `/RE/`, `\cREc`, `/RE/I` | line number (across all inputs), last line, regex match (`//` reuses the last regex) |
+| `A,B`, `ADDR!` | range from A to the next B, negation |
+| `{ ... }` | a block of commands for the selected lines (nestable) |
+| `s/RE/REPL/FLAGS` | substitute; flags `g`, `N`, `p`, `i`/`I`; `&`, `\1`..`\9`, `\n` in REPL |
+| `y/SRC/DST/` | transliterate characters |
+| `d`, `p`, `=`, `q [STATUS]` | delete and start the next cycle, print, print the line number, quit |
+| `a TEXT`, `i TEXT`, `c TEXT` | append, insert, change (also the `a\` multi-line form) |
+| `#`, `;`, newline | comment, command separators; `#n` as the first line means `-n` |
+
+Exit status: `0` on success, `1` for an invalid option, command or regular
+expression, `2` if an input file could not be read, `4` for an I/O error
+(such as a directory as input), or the status given to `q`.
+
+## Differences from GNU sed
+
+- Not implemented, as the roadmap defers them: the hold space (`h H g G x`)
+  and branching (`b t T :label`). Also not implemented: `n N D P l r R w W e F
+  z Q v`, the `s` flags `w`, `e`, `m`/`M`, case conversion (`\U \L \u \l \E`)
+  in replacements, the escapes `\cX \dNNN \oNNN \xHH`, the addresses
+  `0,/RE/`, `FIRST~STEP`, `ADDR,+N`, `ADDR,~N`, and the options `-s`, `-z`,
+  `-u`, `-l`, `--posix`, `--debug`, `--sandbox`, `--follow-symlinks`. Using
+  one is an error with status 1 and the GNU message that fits the text (for
+  example ``unknown command: `h'`` or `invalid option -- 's'`).
+- Regular expressions match leftmost-first (`system.regex`) rather than POSIX
+  leftmost-longest: `echo abcd | sed -E 's/ab|abcd/X/'` prints `Xcd` (GNU:
+  `X`). Back-references inside a regex (`\(a\)\1`) are not supported.
+  Bracket classes and `\w` cover ASCII only.
+- `-i` overwrites the file in place and writes the backup as a copy, instead
+  of renaming a temporary file.
+- A file that exists but cannot be read (no permission) stops sed with
+  `IoError: ...` and status 1: the native runtime's read error cannot be
+  caught.
+- All input is read before the script runs, so error messages about later
+  files can appear before the output of earlier ones.
+- `--help` lists only the implemented options; `--version` prints one line.
 
 ## Layout
 
 ```text
-package.lppkg            # Loup manifest
-Makefile                 # run, check, test, build, ci, clean
-source/                  # the application's Loup code
-├── main.loup            # entry point
-├── cli/                 # argument parsing, help text, command dispatch
-└── commands/            # one module per command
-tests/                   # *_test.loup files
-specs/                   # feature specs: requirements, design, tasks
-skills/loup-programmer/  # agent skill for writing Loup
+source/main.loup               # entry point
+source/appinfo.loup            # name, version, exit statuses 0/1/2/4
+source/cli/args.loup           # option parsing (-n -e -f -E -i)
+source/cli/usage.loup          # --help and --version text
+source/cli/app.loup            # run(): parse, usage errors, exit status
+source/commands/program.loup   # Address, Command, ReplPart enums; Instruction, Program classes
+source/commands/lexer.loup     # Cursor: script characters, error locations, delimited strings
+source/commands/parser.loup    # parse_script(): the script language
+source/commands/pattern.loup   # BRE / ERE -> system.regex syntax
+source/commands/machine.loup   # Machine: the interpreter loop
+source/commands/sed.loup       # run_sed(): script files, inputs, -i, output
+tests/*_test.loup              # unit tests (make test)
+tests/e2e.sh                   # end-to-end tests of build/sed (make e2e)
+tests/fixtures/                # input files and a script file
+specs/sed/                     # requirements, design, tasks
 ```
 
-[AGENTS.md](AGENTS.md) has the full layout, every build and test command, and
-the steps for adding a command.
-
-## Notes on the toolchain
-
-- On Linux x86-64, `loup` is the self-hosted driver and `loup-bootstrap` is
-  Stage0. `check` and `test` use `loup-bootstrap`; on other platforms both
-  names run the same tool. The Makefile handles this.
-- Modules import each other by their path under `source/`
-  (`from cli.args import (Options);`). Tests import them the same way, which
-  is why `make test` puts `source/` on `LOUPPATH`.
-- The Wasm build (`loup-bootstrap build`) is experimental: modules that use
-  `i"..."` interpolation build but trap at run time, so this template builds
-  native binaries.
+[AGENTS.md](AGENTS.md) has every build and test command and the conventions
+for changing the code.

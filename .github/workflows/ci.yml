@@ -31,6 +31,6 @@ jobs:
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: myapp-linux-x86_64
-          path: build/myapp
+          name: sed-linux-x86_64
+          path: build/sed
           if-no-files-found: error

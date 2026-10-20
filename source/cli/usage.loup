@@ -1,28 +1,36 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
-from cli.args import (DEFAULT_GREETING);
+from appinfo import (APP_NAME, APP_VERSION);
 
 pub func usage(): string {
     let lines = [
-        i"usage: {$ APP_NAME $} [OPTIONS] COMMAND [ARGS...]",
+        "Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...",
         "",
-        APP_SUMMARY,
+        "  -n, --quiet, --silent",
+        "                 suppress automatic printing of pattern space",
+        "  -e script, --expression=script",
+        "                 add the script to the commands to be executed",
+        "  -f script-file, --file=script-file",
+        "                 add the contents of script-file to the commands to be executed",
+        "  -i[SUFFIX], --in-place[=SUFFIX]",
+        "                 edit files in place (makes backup if SUFFIX supplied)",
+        "  -E, -r, --regexp-extended",
+        "                 use extended regular expressions in the script",
+        "                 (for portability use POSIX -E).",
+        "      --help     display this help and exit",
+        "      --version  output version information and exit",
         "",
-        "Commands:",
-        "  hello [NAME]          Print a greeting (NAME defaults to 'world')",
-        "  help                  Show this help",
+        "If no -e, --expression, -f, or --file option is given, then the first",
+        "non-option argument is taken as the sed script to interpret.  All",
+        "remaining arguments are names of input files; if no input files are",
+        "specified, then the standard input is read.",
         "",
-        "Options:",
-        i"  -g, --greeting TEXT   Greeting used by 'hello' (default: {$ DEFAULT_GREETING $})",
-        "      --shout           Print the greeting in upper case",
-        "  -v, --verbose         Print diagnostic messages to stderr",
-        "  -h, --help            Show this help and exit",
-        "  -V, --version         Show the version and exit",
+        "Commands: s y d p q = a i c { } and #; addresses N, $, /RE/, \\cREc,",
+        "A,B ranges and !.  The hold space and branching are not implemented.",
     ];
     return lines.join("\n");
 }
 
 pub func version_line(): string {
-    return i"{$ APP_NAME $} {$ APP_VERSION $}";
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
 }

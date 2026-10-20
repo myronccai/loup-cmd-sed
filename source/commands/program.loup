@@ -1,0 +1,110 @@
+@mode(host.dual)
+
+# The parsed form of a sed script. The parser builds a Program; the Machine
+# runs it. Records are classes because they cross module boundaries (see
+# AGENTS.md); the variants are enums, and the interpreter dispatches on them
+# with `match`.
+
+from system.regex import (Regex);
+
+# Index used by Address.Match and Substitution for an empty regex (`//`),
+# which means "the last regex used".
+pub const LAST_REGEX: int = -1;
+
+pub enum Address {
+    Missing,
+    Line(number: int),
+    Last,
+    Match(regex: int),
+}
+
+pub func is_missing(a: Address): bool {
+    match a {
+        Address.Missing => {
+            return true;
+        },
+        _ => {
+            return false;
+        },
+    }
+}
+
+pub func is_line_zero(a: Address): bool {
+    match a {
+        Address.Line(number) => {
+            return number == 0;
+        },
+        _ => {
+            return false;
+        },
+    }
+}
+
+pub enum Command {
+    Substitute(index: int),        # Program.substitutions[index]
+    Transliterate(index: int),     # Program.transliterations[index]
+    Delete,
+    Print,
+    Quit(status: int),
+    LineNumber,
+    Append(text: string),
+    Insert(text: string),
+    Change(text: string),
+    BlockStart(end: int),          # index of the matching BlockEnd
+    BlockEnd,
+}
+
+# A piece of an `s` replacement.
+pub enum ReplPart {
+    Text(value: string),
+    Group(number: int),            # 0 is the whole match (`&`)
+}
+
+pub class Instruction {
+    pub let addr1: Address;
+    pub let addr2: Address;
+    pub let negate: bool;
+    pub var command: Command;
+
+    new(addr1: Address, addr2: Address, negate: bool, command: Command) {
+        this.addr1 = addr1;
+        this.addr2 = addr2;
+        this.negate = negate;
+        this.command = command;
+    }
+}
+
+pub class Substitution {
+    pub let regex: int;            # Program.regexes index, or LAST_REGEX
+    pub let parts: list[ReplPart];
+    pub let replace_all: bool;
+    pub let occurrence: int;       # replace from the Nth match (1 by default)
+    pub let print: bool;
+
+    new(regex: int, parts: list[ReplPart], replace_all: bool, occurrence: int, print: bool) {
+        this.regex = regex;
+        this.parts = parts;
+        this.replace_all = replace_all;
+        this.occurrence = occurrence;
+        this.print = print;
+    }
+}
+
+# `y/SOURCE/DEST/`: equal-length lists of characters.
+pub class Transliteration {
+    pub let source: list[string];
+    pub let dest: list[string];
+
+    new(source: list[string], dest: list[string]) {
+        this.source = source;
+        this.dest = dest;
+    }
+}
+
+pub class Program {
+    pub var instructions: list[Instruction] = [];
+    pub var regexes: list[Regex] = [];
+    pub var substitutions: list[Substitution] = [];
+    pub var transliterations: list[Transliteration] = [];
+    pub var quiet: bool = false;   # the script starts with #n
+}

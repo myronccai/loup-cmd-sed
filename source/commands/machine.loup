@@ -1,0 +1,332 @@
+@mode(host.dual)
+
+# The sed interpreter. For each input line it fills the pattern space, runs
+# the program's instructions whose addresses select the line, then prints
+# the pattern space (unless -n) and the text queued by `a`. Output is
+# collected as a list of pieces; only run_sed prints it.
+
+from system.regex import (Regex, Match);
+from commands.program import (Address, Command, ReplPart, Instruction, Substitution, Transliteration, Program, LAST_REGEX, is_missing);
+
+# Input lines, and whether each one ended with a newline (only the last line
+# of a file may not).
+pub class Input {
+    pub var lines: list[string] = [];
+    pub var complete: list[bool] = [];
+
+    # Appends the lines of one file's text.
+    pub modifier func add_text(text: string): void {
+        if (text.len() == 0) {
+            return;
+        }
+        var parts = text.split("\n");
+        let ends_with_newline = parts[parts.len() - 1].len() == 0;
+        if (ends_with_newline) {
+            parts.pop();
+        }
+        var i = 0;
+        while (i < parts.len()) {
+            this.lines.push(parts[i]);
+            this.complete.push(i + 1 < parts.len() or ends_with_newline);
+            i += 1;
+        }
+    }
+}
+
+func block_end(command: Command): int {
+    match command {
+        Command.BlockStart(end) => {
+            return end;
+        },
+        _ => {
+            return -1;
+        },
+    }
+}
+
+pub class Machine {
+    let program: Program;
+    let quiet: bool;
+    var out: list[string] = [];
+    var missing_newline: bool = false;  # the last output line had no newline
+    var active: list[bool] = [];        # range state per instruction
+    var last_regex: int = -1;
+    var line_complete: bool = true;     # whether the current line had a newline
+    pub var line_number: int = 0;
+    pub var quit: bool = false;
+    pub var exit_code: int = 0;
+    pub var error: string = "";
+
+    new(program: Program, quiet: bool) {
+        this.program = program;
+        this.quiet = quiet;
+        for (ins in program.instructions) {
+            this.active.push(false);
+        }
+    }
+
+    # The output so far.
+    pub func output(): string {
+        return this.out.join("");
+    }
+
+    modifier func emit_text(text: string): void {
+        if (this.missing_newline) {
+            this.out.push("\n");
+            this.missing_newline = false;
+        }
+        this.out.push(text);
+    }
+
+    # Prints a pattern space: without its newline if the input line had
+    # none, in which case the newline comes back before any later output.
+    modifier func emit_line(text: string): void {
+        this.emit_text(text);
+        if (this.line_complete) {
+            this.out.push("\n");
+        } else {
+            this.missing_newline = true;
+        }
+    }
+
+    modifier func fail(message: string): void {
+        if (this.error == "") {
+            this.error = message;
+        }
+        this.quit = true;
+        this.exit_code = 1;
+    }
+
+    # The regex for index `r`, resolving LAST_REGEX; -1 if there is none.
+    modifier func resolve(r: int): int {
+        if (r != LAST_REGEX) {
+            this.last_regex = r;
+            return r;
+        }
+        if (this.last_regex < 0) {
+            this.fail("-e expression #1, char 0: no previous regular expression");
+        }
+        return this.last_regex;
+    }
+
+    modifier func address_matches(a: Address, ps: string, is_last: bool): bool {
+        var hit = false;
+        match a {
+            Address.Missing => {
+                hit = true;
+            },
+            Address.Line(number) => {
+                hit = this.line_number == number;
+            },
+            Address.Last => {
+                hit = is_last;
+            },
+            Address.Match(regex) => {
+                let r = this.resolve(regex);
+                hit = r >= 0 and this.program.regexes[r].isMatch(ps);
+            },
+        }
+        return hit;
+    }
+
+    # Whether instruction `pc` applies to the current line, updating its
+    # range state.
+    modifier func selects(pc: int, ins: Instruction, ps: string, is_last: bool): bool {
+        var hit = false;
+        if (is_missing(ins.addr2)) {
+            hit = this.address_matches(ins.addr1, ps, is_last);
+        } else if (!this.active[pc]) {
+            if (this.address_matches(ins.addr1, ps, is_last)) {
+                hit = true;
+                var ends_here = false;
+                match ins.addr2 {
+                    Address.Line(number) => {
+                        ends_here = number <= this.line_number;
+                    },
+                    Address.Last => {
+                        ends_here = is_last;
+                    },
+                    _ => {
+                        ends_here = false;
+                    },
+                }
+                this.active[pc] = !ends_here;
+            }
+        } else {
+            hit = true;
+            var ends_here = false;
+            match ins.addr2 {
+                Address.Line(number) => {
+                    ends_here = this.line_number >= number;
+                },
+                Address.Last => {
+                    ends_here = is_last;
+                },
+                _ => {
+                    ends_here = this.address_matches(ins.addr2, ps, is_last);
+                },
+            }
+            if (ends_here) {
+                this.active[pc] = false;
+            }
+        }
+        return if (ins.negate) { !hit } else { hit };
+    }
+
+    # The replacement text for match `m`. (The local is not called `out`:
+    # Stage0 confuses a local with the field `this.out` of the same name.)
+    func expand(parts: list[ReplPart], m: Match): string {
+        var text = "";
+        for (part in parts) {
+            match part {
+                ReplPart.Text(value) => {
+                    text += value;
+                },
+                ReplPart.Group(number) => {
+                    if (number == 0) {
+                        text += m.value;
+                    } else {
+                        text += m.groupByIndex(number) ?? "";
+                    }
+                },
+            }
+        }
+        return text;
+    }
+
+    # Applies substitution `index` to `ps`; returns the new pattern space.
+    modifier func substitute(index: int, ps: string): string {
+        let sub = this.program.substitutions[index];
+        let r = this.resolve(sub.regex);
+        if (r < 0) {
+            return ps;
+        }
+        let re = this.program.regexes[r];
+        var result = "";
+        var count = 0;
+        var pos = 0;
+        var prev_end = -1;
+        var replaced = false;
+        for (m in re.findAll(ps)) {
+            # An empty match right after the previous match does not count
+            # (`s/a*/x/g` on `baaac` gives `xbxcx`).
+            if (m.start == m.end and m.start == prev_end) {
+                continue;
+            }
+            count += 1;
+            prev_end = m.end;
+            if (count < sub.occurrence) {
+                continue;
+            }
+            result += ps.substring(pos, m.start) + this.expand(sub.parts, m);
+            pos = m.end;
+            replaced = true;
+            if (!sub.replace_all) {
+                break;
+            }
+        }
+        if (!replaced) {
+            return ps;
+        }
+        result += ps.substring(pos, ps.len());
+        if (sub.print) {
+            this.emit_line(result);
+        }
+        return result;
+    }
+
+    func transliterate(index: int, ps: string): string {
+        let t = this.program.transliterations[index];
+        var pieces: list[string] = [];
+        for (ch in ps) {
+            var mapped = ch;
+            var k = 0;
+            while (k < t.source.len()) {
+                if (t.source[k] == ch) {
+                    mapped = t.dest[k];
+                    break;
+                }
+                k += 1;
+            }
+            pieces.push(mapped);
+        }
+        return pieces.join("");
+    }
+
+    # Runs the program over `input`; its last line is the last line of the
+    # stream (`$`). Line numbers continue from earlier calls.
+    pub modifier func run(input: Input): void {
+        let program = this.program.instructions;
+        let n = input.lines.len();
+        var i = 0;
+        while (i < n and !this.quit) {
+            this.line_number += 1;
+            this.line_complete = input.complete[i];
+            var ps = input.lines[i];
+            let is_last = i == n - 1;
+            var appends: list[string] = [];
+            var autoprint = !this.quiet;
+            var end_cycle = false;
+            var pc = 0;
+            while (pc < program.len() and !end_cycle) {
+                let ins = program[pc];
+                if (!this.selects(pc, ins, ps, is_last)) {
+                    let end = block_end(ins.command);
+                    pc = if (end >= 0) { end + 1 } else { pc + 1 };
+                    continue;
+                }
+                match ins.command {
+                    Command.Substitute(index) => {
+                        ps = this.substitute(index, ps);
+                    },
+                    Command.Transliterate(index) => {
+                        ps = this.transliterate(index, ps);
+                    },
+                    Command.Delete => {
+                        autoprint = false;
+                        end_cycle = true;
+                    },
+                    Command.Print => {
+                        this.emit_line(ps);
+                    },
+                    Command.Quit(status) => {
+                        this.exit_code = status;
+                        this.quit = true;
+                        end_cycle = true;
+                    },
+                    Command.LineNumber => {
+                        this.emit_text(str(this.line_number) + "\n");
+                    },
+                    Command.Append(text) => {
+                        appends.push(text);
+                    },
+                    Command.Insert(text) => {
+                        this.emit_text(text);
+                    },
+                    Command.Change(text) => {
+                        # With a range, the text replaces the whole range.
+                        let inside_range = !is_missing(ins.addr2) and this.active[pc] and !ins.negate;
+                        if (!inside_range) {
+                            this.emit_text(text);
+                        }
+                        autoprint = false;
+                        end_cycle = true;
+                    },
+                    Command.BlockStart(end) => {},
+                    Command.BlockEnd => {},
+                }
+                if (this.error != "") {
+                    return;
+                }
+                pc += 1;
+            }
+            if (autoprint) {
+                this.emit_line(ps);
+            }
+            for (text in appends) {
+                this.emit_text(text);
+            }
+            i += 1;
+        }
+    }
+}

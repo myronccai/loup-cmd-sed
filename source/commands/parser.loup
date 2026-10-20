@@ -1,0 +1,497 @@
+@mode(host.dual)
+
+# The parser of the sed script language: turns the script pieces into a
+# Program (see program.loup). It reads one command at a time: addresses, `!`,
+# the command letter, then the command's arguments. Errors are thrown as
+# ScriptError with GNU's location and message, and parse_script returns
+# them as Err.
+
+from system.regex import (Regex);
+from commands.lexer import (Source, Cursor);
+from commands.pattern import (translate);
+from commands.program import (Address, Command, ReplPart, Instruction, Substitution, Transliteration, Program, LAST_REGEX, is_missing, is_line_zero);
+
+pub class ScriptError : Exception {}
+
+const DIGITS: string = "0123456789";
+
+# The control character for `\t`-style escapes in text, replacements and `y`,
+# or "" when `c` is not one of t n r f v a.
+func control(c: string): string {
+    if (c == "n") {
+        return "\n";
+    }
+    if (c == "t") {
+        return "\t";
+    }
+    if (c == "r") {
+        return "\r";
+    }
+    if (c == "f") {
+        return str(char.of(12));
+    }
+    if (c == "v") {
+        return str(char.of(11));
+    }
+    if (c == "a") {
+        return str(char.of(7));
+    }
+    return "";
+}
+
+# Text of `a`, `i`, `c` after GNU's escape processing: backslash-newline is
+# a newline, `\t` and friends are control characters, `\X` is X.
+pub func unescape_text(raw: string): string {
+    var out = "";
+    var escaped = false;
+    for (ch in raw) {
+        if (escaped) {
+            let ctl = control(ch);
+            out += if (ctl != "" and ch != "\n") { ctl } else { ch };
+            escaped = false;
+        } else if (ch == "\\") {
+            escaped = true;
+        } else {
+            out += ch;
+        }
+    }
+    if (escaped) {
+        out += "\\";
+    }
+    return out;
+}
+
+# The characters of a `y` argument: `\\` is a backslash, `\n` and `\t` are
+# control characters, `\X` is X.
+pub func y_chars(raw: string): list[string] {
+    var out: list[string] = [];
+    var escaped = false;
+    for (ch in raw) {
+        if (escaped) {
+            let ctl = control(ch);
+            out.push(if (ctl != "") { ctl } else { ch });
+            escaped = false;
+        } else if (ch == "\\") {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    if (escaped) {
+        out.push("\\");
+    }
+    return out;
+}
+
+# An `s` replacement as parts: `&` is the match, `\1`..`\9` groups, `\n`
+# a newline, `\&` and `\\` literal. -1 in `highest` reports no group.
+pub class Replacement {
+    pub let parts: list[ReplPart];
+    pub let highest: int;
+
+    new(parts: list[ReplPart], highest: int) {
+        this.parts = parts;
+        this.highest = highest;
+    }
+}
+
+pub func parse_replacement(raw: string): Replacement {
+    var parts: list[ReplPart] = [];
+    var text = "";
+    var highest = 0;
+    var escaped = false;
+    for (ch in raw) {
+        if (escaped) {
+            escaped = false;
+            let d = DIGITS.index_of(ch);
+            if (d >= 0) {
+                if (text != "") {
+                    parts.push(ReplPart.Text(value = text));
+                    text = "";
+                }
+                parts.push(ReplPart.Group(number = d));
+                if (d > highest) {
+                    highest = d;
+                }
+            } else {
+                let ctl = control(ch);
+                text += if (ctl != "") { ctl } else { ch };
+            }
+        } else if (ch == "\\") {
+            escaped = true;
+        } else if (ch == "&") {
+            if (text != "") {
+                parts.push(ReplPart.Text(value = text));
+                text = "";
+            }
+            parts.push(ReplPart.Group(number = 0));
+        } else {
+            text += ch;
+        }
+    }
+    if (escaped) {
+        text += "\\";
+    }
+    if (text != "") {
+        parts.push(ReplPart.Text(value = text));
+    }
+    return Replacement(parts, highest);
+}
+
+class Parser {
+    let cursor: Cursor;
+    let extended: bool;
+    pub let program: Program;
+    var group_counts: list[int] = [];
+    var open_blocks: list[int] = [];      # instruction index of each open `{`
+    var open_positions: list[int] = [];   # cursor position of each open `{`
+
+    new(sources: list[Source], extended: bool) {
+        this.cursor = Cursor(sources);
+        this.extended = extended;
+        this.program = Program();
+    }
+
+    safe modifier func fail(message: string): void {
+        throw ScriptError(this.cursor.location() + ": " + message);
+    }
+
+    # Translates and compiles a regex; returns its index (LAST_REGEX for "").
+    safe modifier func regex(text: string, icase: bool): int {
+        if (text == "") {
+            # The last regex used when the command runs; GNU reports a
+            # missing one at run time.
+            return LAST_REGEX;
+        }
+        let t = translate(text, this.extended, icase);
+        if (t.is_err()) {
+            this.fail(t.unwrap_err());
+        }
+        let tr = t.unwrap();
+        let compiled = Regex.compile(tr.source);
+        if (compiled.is_err()) {
+            this.fail("internal error: cannot compile " + tr.source);
+        }
+        safe {
+            this.program.regexes.push(compiled.unwrap());
+        }
+        this.group_counts.push(tr.groups);
+        return this.program.regexes.len() - 1;
+    }
+
+    # An address, or Address.Missing when the next character starts none.
+    safe modifier func address(): Address {
+        let c = this.cursor.peek();
+        if (c != "" and DIGITS.index_of(c) >= 0) {
+            return Address.Line(number = this.cursor.number());
+        }
+        if (c == "$") {
+            this.cursor.next();
+            return Address.Last;
+        }
+        if (c == "/" or c == "\\") {
+            this.cursor.next();
+            var delim = "/";
+            if (c == "\\") {
+                delim = this.cursor.next();
+                if (delim == "" or delim == "\n" or delim == "\\") {
+                    this.fail("unterminated address regex");
+                }
+            }
+            let text = this.cursor.delimited(delim, true);
+            if (text.is_none()) {
+                this.fail("unterminated address regex");
+            }
+            var icase = false;
+            while (this.cursor.peek() == "I") {
+                this.cursor.next();
+                icase = true;
+            }
+            return Address.Match(regex = this.regex(text.unwrap(), icase));
+        }
+        return Address.Missing;
+    }
+
+    # After a command: blanks, then the end of the script, a newline, `;`,
+    # or a `}` or `#` left for the next command.
+    safe modifier func end_of_command(): void {
+        this.cursor.skip_blanks();
+        let c = this.cursor.peek();
+        if (c == "" or c == "}" or c == "#") {
+            return;
+        }
+        this.cursor.next();
+        if (c != "\n" and c != ";") {
+            this.fail("extra characters after command");
+        }
+    }
+
+    # The text argument of `a`, `i` and `c`, in GNU's one-line or `\` form.
+    safe modifier func text_argument(): string {
+        this.cursor.skip_blanks();
+        var c = this.cursor.peek();
+        if (c == "") {
+            this.cursor.next();
+            this.fail("expected \\ after `a', `c' or `i'");
+        }
+        var raw = "";
+        if (c == "\\") {
+            this.cursor.next();
+            let lead = this.cursor.next();
+            if (lead == "") {
+                return "";
+            }
+            if (lead != "\n") {
+                raw += lead;
+                if (lead == "\\") {
+                    raw += this.cursor.next();
+                }
+            }
+        }
+        var ch = this.cursor.next();
+        while (ch != "" and ch != "\n") {
+            if (ch == "\\") {
+                ch = this.cursor.next();
+                if (ch != "") {
+                    raw += "\\";
+                }
+            }
+            if (ch == "") {
+                break;
+            }
+            raw += ch;
+            ch = this.cursor.next();
+        }
+        return unescape_text(raw) + "\n";
+    }
+
+    safe modifier func substitute(): Command {
+        let delim = this.cursor.next();
+        if (delim == "" or delim == "\n" or delim == "\\") {
+            this.fail("unterminated `s' command");
+        }
+        let pattern = this.cursor.delimited(delim, true);
+        if (pattern.is_none()) {
+            this.fail("unterminated `s' command");
+        }
+        let replacement = this.cursor.delimited(delim, false);
+        if (replacement.is_none()) {
+            this.fail("unterminated `s' command");
+        }
+        var replace_all = false;
+        var print = false;
+        var icase = false;
+        var occurrence = 0;
+        var done = false;
+        while (!done) {
+            let c = this.cursor.next();
+            if (c == "g") {
+                if (replace_all) {
+                    this.fail("multiple `g' options to `s' command");
+                }
+                replace_all = true;
+            } else if (c == "p") {
+                if (print) {
+                    this.fail("multiple `p' options to `s' command");
+                }
+                print = true;
+            } else if (c == "i" or c == "I") {
+                icase = true;
+            } else if (c != "" and DIGITS.index_of(c) >= 0) {
+                if (occurrence > 0) {
+                    this.fail("multiple number options to `s' command");
+                }
+                this.cursor.back();
+                occurrence = this.cursor.number();
+                if (occurrence == 0) {
+                    this.fail("number option to `s' command may not be zero");
+                }
+            } else if (c == " " or c == "\t") {
+                # GNU allows blanks between the flags.
+            } else if (c == "" or c == "\n" or c == ";") {
+                done = true;
+            } else if (c == "}" or c == "#") {
+                this.cursor.back();
+                done = true;
+            } else {
+                this.fail("unknown option to `s'");
+            }
+        }
+        let index = this.regex(pattern.unwrap(), icase);
+        let repl = parse_replacement(replacement.unwrap());
+        if (index != LAST_REGEX and repl.highest > this.group_counts[index]) {
+            this.fail("invalid reference \\" + str(repl.highest) + " on `s' command's RHS");
+        }
+        let first = if (occurrence > 0) { occurrence } else { 1 };
+        safe {
+            this.program.substitutions.push(Substitution(index, repl.parts, replace_all, first, print));
+        }
+        return Command.Substitute(index = this.program.substitutions.len() - 1);
+    }
+
+    safe modifier func transliterate(): Command {
+        let delim = this.cursor.next();
+        if (delim == "" or delim == "\n" or delim == "\\") {
+            this.fail("unterminated `y' command");
+        }
+        let source = this.cursor.delimited(delim, false);
+        if (source.is_none()) {
+            this.fail("unterminated `y' command");
+        }
+        let dest = this.cursor.delimited(delim, false);
+        if (dest.is_none()) {
+            this.fail("unterminated `y' command");
+        }
+        let from_chars = y_chars(source.unwrap());
+        let to_chars = y_chars(dest.unwrap());
+        if (from_chars.len() != to_chars.len()) {
+            this.fail("strings for `y' command are different lengths");
+        }
+        this.end_of_command();
+        safe {
+            this.program.transliterations.push(Transliteration(from_chars, to_chars));
+        }
+        return Command.Transliterate(index = this.program.transliterations.len() - 1);
+    }
+
+    safe modifier func add(addr1: Address, addr2: Address, negate: bool, command: Command): void {
+        safe {
+            this.program.instructions.push(Instruction(addr1, addr2, negate, command));
+        }
+    }
+
+    # One command with its addresses.
+    safe modifier func command(): void {
+        let addr1 = this.address();
+        var addr2 = Address.Missing;
+        let has1 = !is_missing(addr1);
+        if (has1) {
+            this.cursor.skip_blanks();
+            if (this.cursor.peek() == ",") {
+                this.cursor.next();
+                this.cursor.skip_blanks();
+                addr2 = this.address();
+                if (is_missing(addr2)) {
+                    this.fail("unexpected `,'");
+                }
+            }
+        }
+        let has2 = !is_missing(addr2);
+        this.cursor.skip_blanks();
+        var negate = false;
+        if (this.cursor.peek() == "!") {
+            this.cursor.next();
+            negate = true;
+            this.cursor.skip_blanks();
+            if (this.cursor.peek() == "!") {
+                this.cursor.next();
+                this.fail("multiple `!'s");
+            }
+        }
+        let c = this.cursor.next();
+        if (c == "" or c == "\n" or c == ";") {
+            if (c != "") {
+                this.cursor.back();
+            }
+            this.fail("missing command");
+        }
+        if (is_line_zero(addr1)) {
+            this.fail("invalid usage of line address 0");
+        }
+
+        if (c == "{") {
+            this.open_blocks.push(this.program.instructions.len());
+            this.open_positions.push(this.cursor.pos);
+            this.add(addr1, addr2, negate, Command.BlockStart(end = -1));
+        } else if (c == "}") {
+            if (this.open_blocks.len() == 0) {
+                this.fail("unexpected `}'");
+            }
+            if (has1) {
+                this.fail("`}' doesn't want any addresses");
+            }
+            let start = this.open_blocks.pop();
+            this.open_positions.pop();
+            let end = this.program.instructions.len();
+            safe {
+                this.program.instructions[start].command = Command.BlockStart(end = end);
+            }
+            this.add(addr1, addr2, negate, Command.BlockEnd);
+            this.end_of_command();
+        } else if (c == "#") {
+            if (has1) {
+                this.fail("comments don't accept any addresses");
+            }
+            while (this.cursor.peek() != "" and this.cursor.peek() != "\n") {
+                this.cursor.next();
+            }
+        } else if (c == "d") {
+            this.end_of_command();
+            this.add(addr1, addr2, negate, Command.Delete);
+        } else if (c == "p") {
+            this.end_of_command();
+            this.add(addr1, addr2, negate, Command.Print);
+        } else if (c == "=") {
+            this.end_of_command();
+            this.add(addr1, addr2, negate, Command.LineNumber);
+        } else if (c == "q") {
+            if (has2) {
+                this.fail("command only uses one address");
+            }
+            this.cursor.skip_blanks();
+            let status = this.cursor.number();
+            this.end_of_command();
+            this.add(addr1, addr2, negate, Command.Quit(status = if (status < 0) { 0 } else { status }));
+        } else if (c == "a") {
+            this.add(addr1, addr2, negate, Command.Append(text = this.text_argument()));
+        } else if (c == "i") {
+            this.add(addr1, addr2, negate, Command.Insert(text = this.text_argument()));
+        } else if (c == "c") {
+            this.add(addr1, addr2, negate, Command.Change(text = this.text_argument()));
+        } else if (c == "s") {
+            let cmd = this.substitute();
+            this.add(addr1, addr2, negate, cmd);
+        } else if (c == "y") {
+            let cmd = this.transliterate();
+            this.add(addr1, addr2, negate, cmd);
+        } else {
+            this.fail("unknown command: `" + c + "'");
+        }
+    }
+
+    pub safe modifier func parse(): void {
+        # `#n` at the very start of the script means -n.
+        if (this.cursor.peek() == "#" and this.cursor.peek2() == "n") {
+            safe {
+                this.program.quiet = true;
+            }
+            while (this.cursor.peek() != "" and this.cursor.peek() != "\n") {
+                this.cursor.next();
+            }
+        }
+        while (true) {
+            this.cursor.skip_separators();
+            if (this.cursor.at_end()) {
+                break;
+            }
+            this.command();
+        }
+        if (this.open_blocks.len() > 0) {
+            let at = this.open_positions[this.open_positions.len() - 1] - 1;
+            throw ScriptError(this.cursor.location_of_piece(at) + ": unmatched `{'");
+        }
+    }
+}
+
+# Parses the script pieces; Err carries GNU's located message.
+pub func parse_script(sources: list[Source], extended: bool): Result[Program, string] {
+    let p = Parser(sources, extended);
+    try {
+        safe {
+            p.parse();
+        }
+    } catch (ScriptError as e) {
+        return Err(e.message);
+    }
+    return Ok(p.program);
+}

@@ -1,64 +1,75 @@
 @mode(host.dual)
 
 from debug.assert import (expect, expectEq);
-from cli.args import (parse_args, DEFAULT_GREETING);
+from cli.args import (Options, ArgError, parse_args, tokenize, find_long);
 
-func test_no_arguments(): void {
+func ok(argv: list[string]): Options {
+    return parse_args(argv).unwrap();
+}
+
+func error_of(argv: list[string]): ArgError {
+    return parse_args(argv).unwrap_err();
+}
+
+func test_script_operand_then_files(): void {
+    let o = ok(["s/a/b/", "x.txt", "y.txt"]);
+    expectEq(o.pieces.len(), 1, "one piece");
+    expectEq(o.pieces[0].value, "s/a/b/", "script");
+    expect(!o.pieces[0].from_file, "an expression");
+    expectEq(o.files.len(), 2, "two files");
+}
+
+func test_e_and_f_pieces_keep_their_order(): void {
+    let o = ok(["-e", "p", "-f", "s.sed", "--expression=d", "in.txt"]);
+    expectEq(o.pieces.len(), 3, "three pieces");
+    expect(o.pieces[1].from_file, "-f");
+    expectEq(o.pieces[2].value, "d", "--expression=");
+    expectEq(o.files[0], "in.txt", "every operand is a file");
+}
+
+func test_flags_and_permutation(): void {
+    let o = ok(["p", "f.txt", "-nE"]);
+    expect(o.quiet and o.extended, "-nE after the operands");
+    expect(ok(["-r", "p"]).extended, "-r");
+    expect(ok(["--silent", "p"]).quiet, "--silent");
+    expect(ok(["--qu", "p"]).quiet, "prefix of --quiet");
+}
+
+func test_in_place_suffixes(): void {
+    let plain = ok(["-i", "p", "f"]);
+    expect(plain.in_place, "-i");
+    expectEq(plain.suffix, "", "no suffix");
+    expectEq(ok(["-i.bak", "p", "f"]).suffix, ".bak", "-i.bak");
+    expectEq(ok(["-ni", "p", "f"]).suffix, "", "-ni");
+    expectEq(ok(["-in", "p", "f"]).suffix, "n", "-in means suffix n");
+    expectEq(ok(["--in-place=~", "p", "f"]).suffix, "~", "--in-place=");
+    expectEq(ok(["--in-place", "p", "f"]).files[0], "f", "--in-place takes no separate value");
+}
+
+func test_double_dash(): void {
+    let o = ok(["-n", "--", "-p"]);
+    expectEq(o.pieces[0].value, "-p", "script after --");
+}
+
+func test_usage_errors(): void {
     let none: list[string] = [];
-    let opts = parse_args(none).unwrap();
-    expectEq(opts.command, "", "no command");
-    expectEq(opts.operands.len(), 0, "no operands");
-    expectEq(opts.greeting, DEFAULT_GREETING, "default greeting");
-    expect(!opts.help and !opts.version and !opts.verbose and !opts.shout, "no flags set");
+    let bare = error_of(none);
+    expectEq(bare.message, "", "no script");
+    expect(bare.usage, "usage text");
+    expectEq(error_of(["-k", "p"]).message, "invalid option -- 'k'", "-k");
+    expectEq(error_of(["--foo"]).message, "unrecognized option '--foo'", "--foo");
+    expectEq(error_of(["-e"]).message, "option requires an argument -- 'e'", "-e");
+    expectEq(error_of(["--file"]).message, "option '--file' requires an argument", "--file");
+    expectEq(error_of(["--quiet=1", "p"]).message, "option '--quiet' doesn't allow an argument", "--quiet=1");
+    expectEq(find_long("version").len(), 1, "exact");
+    expectEq(find_long("nothing").len(), 0, "unknown");
 }
 
-func test_command_and_operands(): void {
-    let opts = parse_args(["hello", "Ann"]).unwrap();
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands.len(), 1, "one operand");
-    expectEq(opts.operands[0], "Ann", "operand");
+func test_help_and_version_need_no_script(): void {
+    expect(ok(["--help"]).help, "--help");
+    expect(ok(["--vers"]).version, "--vers");
 }
 
-func test_flags_anywhere(): void {
-    let opts = parse_args(["-v", "hello", "--shout", "Ann"]).unwrap();
-    expect(opts.verbose, "verbose");
-    expect(opts.shout, "shout");
-    expectEq(opts.command, "hello", "command");
-    expectEq(opts.operands[0], "Ann", "operand");
-}
-
-func test_help_and_version(): void {
-    expect(parse_args(["--help"]).unwrap().help, "--help");
-    expect(parse_args(["-h"]).unwrap().help, "-h");
-    expect(parse_args(["--version"]).unwrap().version, "--version");
-    expect(parse_args(["-V"]).unwrap().version, "-V");
-}
-
-func test_value_option_forms(): void {
-    expectEq(parse_args(["-g", "Hi"]).unwrap().greeting, "Hi", "-g VALUE");
-    expectEq(parse_args(["--greeting", "Hi"]).unwrap().greeting, "Hi", "--greeting VALUE");
-    expectEq(parse_args(["--greeting=a=b"]).unwrap().greeting, "a=b", "--greeting=VALUE keeps '='");
-}
-
-func test_double_dash_ends_options(): void {
-    let opts = parse_args(["hello", "--", "--shout"]).unwrap();
-    expect(!opts.shout, "--shout after -- is an operand");
-    expectEq(opts.operands[0], "--shout", "operand");
-}
-
-func test_lone_dash_is_operand(): void {
-    let opts = parse_args(["hello", "-"]).unwrap();
-    expectEq(opts.operands[0], "-", "operand");
-}
-
-func test_unknown_option(): void {
-    expectEq(parse_args(["--nope"]).unwrap_err(), "unknown option '--nope'", "error message");
-}
-
-func test_missing_value(): void {
-    expectEq(parse_args(["-g"]).unwrap_err(), "option '-g' requires a value", "error message");
-}
-
-func test_flag_with_value(): void {
-    expectEq(parse_args(["--shout=1"]).unwrap_err(), "option '--shout' does not take a value", "error message");
+func test_tokenize_stops_at_first_error(): void {
+    expectEq(tokenize(["-n", "-k", "-E"]).len(), 2, "-n then the bad -k");
 }

@@ -1,0 +1,140 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.lexer import (Source);
+from commands.parser import (parse_script, parse_replacement, unescape_text, y_chars);
+from commands.program import (Program, Command, Address, ReplPart);
+
+func parse(script: string): Program {
+    return parse_script([Source(script, "", 1)], false).unwrap();
+}
+
+func error_of(script: string): string {
+    return parse_script([Source(script, "", 1)], false).unwrap_err();
+}
+
+func kind(c: Command): string {
+    match c {
+        Command.Substitute(index) => { return "s"; },
+        Command.Transliterate(index) => { return "y"; },
+        Command.Delete => { return "d"; },
+        Command.Print => { return "p"; },
+        Command.Quit(status) => { return "q" + str(status); },
+        Command.LineNumber => { return "="; },
+        Command.Append(text) => { return "a"; },
+        Command.Insert(text) => { return "i"; },
+        Command.Change(text) => { return "c"; },
+        Command.BlockStart(end) => { return "{" + str(end); },
+        Command.BlockEnd => { return "}"; },
+    }
+}
+
+func kinds(p: Program): string {
+    var out: list[string] = [];
+    for (ins in p.instructions) {
+        out.push(kind(ins.command));
+    }
+    return out.join(" ");
+}
+
+func addr(a: Address): string {
+    match a {
+        Address.Missing => { return "-"; },
+        Address.Line(number) => { return str(number); },
+        Address.Last => { return "$"; },
+        Address.Match(regex) => { return "/" + str(regex); },
+    }
+}
+
+func test_commands_and_separators(): void {
+    expectEq(kinds(parse("p;d\n=  ;q5")), "p d = q5", "four commands");
+    expectEq(kinds(parse("s/a/b/;y/a/b/")), "s y", "s and y");
+    expectEq(kinds(parse("# only a comment\np")), "p", "comment");
+}
+
+func test_addresses(): void {
+    let p = parse("3,$p;/x/I!d;\\,y,p");
+    let first = p.instructions[0];
+    expectEq(addr(first.addr1) + " " + addr(first.addr2), "3 $", "line and last");
+    expect(p.instructions[1].negate, "!");
+    expectEq(addr(p.instructions[1].addr1), "/0", "regex address");
+    expectEq(addr(p.instructions[2].addr1), "/1", "custom delimiter");
+    expectEq(p.regexes.len(), 2, "two regexes compiled");
+}
+
+func test_blocks_record_their_end(): void {
+    expectEq(kinds(parse("1{p;2{d}};=")), "{5 p {4 d } } =", "nested blocks");
+}
+
+func test_text_commands(): void {
+    let p = parse("1a\\\nfirst\\\nsecond\n2i  one line\n3c\\x");
+    var texts: list[string] = [];
+    for (ins in p.instructions) {
+        match ins.command {
+            Command.Append(text) => { texts.push(text); },
+            Command.Insert(text) => { texts.push(text); },
+            Command.Change(text) => { texts.push(text); },
+            _ => {},
+        }
+    }
+    expectEq(texts.join("|"), "first\nsecond\n|one line\n|x\n", "a, i, c texts");
+    expectEq(unescape_text("a\\tb\\qc"), "a\tbqc", "text escapes");
+}
+
+func test_hash_n_means_quiet(): void {
+    expect(parse("#n\np").quiet, "#n");
+    expect(!parse(" #n\np").quiet, "only at the very start");
+}
+
+func test_substitution_flags(): void {
+    let p = parse("s/a/b/3gp");
+    let sub = p.substitutions[0];
+    expect(sub.replace_all and sub.print, "g and p");
+    expectEq(sub.occurrence, 3, "number");
+    expectEq(parse("s/a/b/").substitutions[0].occurrence, 1, "first by default");
+}
+
+func test_replacement_parts(): void {
+    let r = parse_replacement("<&\\1\\&\\n>");
+    expectEq(r.highest, 1, "highest group");
+    var shown: list[string] = [];
+    for (part in r.parts) {
+        match part {
+            ReplPart.Text(value) => { shown.push("T:" + value); },
+            ReplPart.Group(number) => { shown.push("G" + str(number)); },
+        }
+    }
+    expectEq(shown.join(","), "T:<,G0,G1,T:&\n>", "parts");
+}
+
+func test_y_characters(): void {
+    expectEq(y_chars("a\\nb\\\\").join(","), "a,\n,b,\\", "escapes");
+}
+
+func test_errors(): void {
+    expectEq(error_of("k"), "-e expression #1, char 1: unknown command: `k'", "unknown");
+    expectEq(error_of("s/a/b"), "-e expression #1, char 5: unterminated `s' command", "unterminated s");
+    expectEq(error_of("s/a/b/q"), "-e expression #1, char 7: unknown option to `s'", "s option");
+    expectEq(error_of("{p"), "-e expression #1, char 0: unmatched `{'", "unmatched {");
+    expectEq(error_of("p}"), "-e expression #1, char 2: unexpected `}'", "unexpected }");
+    expectEq(error_of("y/ab/x/"), "-e expression #1, char 7: strings for `y' command are different lengths", "y lengths");
+    expectEq(error_of("s/\\(a\\)/\\2/"), "-e expression #1, char 11: invalid reference \\2 on `s' command's RHS", "bad reference");
+    expectEq(error_of("a"), "-e expression #1, char 1: expected \\ after `a', `c' or `i'", "a without text");
+    expectEq(error_of("3,"), "-e expression #1, char 2: unexpected `,'", "missing second address");
+    expectEq(error_of("/x"), "-e expression #1, char 2: unterminated address regex", "address regex");
+    expectEq(error_of("0p"), "-e expression #1, char 2: invalid usage of line address 0", "line 0");
+    expectEq(error_of("p p"), "-e expression #1, char 3: extra characters after command", "extra");
+    expectEq(error_of("s/a/b/gg"), "-e expression #1, char 8: multiple `g' options to `s' command", "gg");
+    expectEq(error_of("s/a/b/0"), "-e expression #1, char 7: number option to `s' command may not be zero", "zero");
+    expectEq(error_of("1,2q"), "-e expression #1, char 4: command only uses one address", "q range");
+    expectEq(error_of("1"), "-e expression #1, char 1: missing command", "missing command");
+    expectEq(error_of("1!!p"), "-e expression #1, char 3: multiple `!'s", "two !");
+    expectEq(error_of("1#c"), "-e expression #1, char 2: comments don't accept any addresses", "comment address");
+    expectEq(error_of("s/a\\(/x/"), "-e expression #1, char 8: Unmatched ( or \\(", "regex error");
+    expectEq(error_of("h"), "-e expression #1, char 1: unknown command: `h'", "hold space is deferred");
+}
+
+func test_error_in_a_file(): void {
+    let r = parse_script([Source("p", "", 1), Source("p\n\nk", "s.sed", 0)], false);
+    expectEq(r.unwrap_err(), "file s.sed line 3: unknown command: `k'", "file and line");
+}

@@ -1,0 +1,36 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from system.regex import (Regex);
+from commands.pattern import (translate, BACKREF_MESSAGE);
+
+func bre(p: string): string {
+    return translate(p, false, false).unwrap().source;
+}
+
+func test_groups_capture_and_are_counted(): void {
+    let t = translate("\\(a\\)\\(b*\\)", false, false).unwrap();
+    expectEq(t.source, "(a)(b*)", "capturing groups");
+    expectEq(t.groups, 2, "two groups");
+    expectEq(translate("(x|y)+", true, false).unwrap().source, "(x|y)+", "ERE group");
+}
+
+func test_sed_escapes_and_dot(): void {
+    expectEq(bre("a\\tb"), "a\\x{9}b", "tab");
+    expectEq(bre("\n"), "\\x{A}", "newline");
+    expectEq(bre("a.b"), "a[\\s\\S]b", "dot matches a newline too");
+    expect(Regex(bre("a.b")).isMatch("a\nb"), "dot across a newline");
+}
+
+func test_bre_and_ere_rules(): void {
+    expectEq(bre("a+b?"), "a\\+b\\?", "literal + and ?");
+    expectEq(bre("x\\{2,3\\}"), "x{2,3}", "interval");
+    expectEq(bre("^*"), "^\\*", "leading star after ^");
+    expectEq(translate("[[:digit:]]", false, true).unwrap().source, "[0-9]", "class");
+    expectEq(translate("ab", false, true).unwrap().source, "[aA][bB]", "ignore case");
+}
+
+func test_errors(): void {
+    expectEq(translate("a\\(", false, false).unwrap_err(), "Unmatched ( or \\(", "group");
+    expectEq(translate("\\(a\\)\\1", false, false).unwrap_err(), BACKREF_MESSAGE, "back-reference");
+}

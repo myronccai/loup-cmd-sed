@@ -1,0 +1,179 @@
+@mode(host.dual)
+
+# sed: reads the script pieces, parses them, reads the inputs, runs the
+# program and prints the output, or writes it back to each file under -i.
+# The only module that prints.
+
+from io.fs import (isDir);
+from appinfo import (APP_NAME, EXIT_OK, EXIT_BAD_USAGE, EXIT_BAD_INPUT, EXIT_PANIC);
+from cli.args import (Options);
+from commands.lexer import (Source);
+from commands.parser import (parse_script);
+from commands.program import (Program);
+from commands.machine import (Machine, Input);
+
+func complain(message: string): void {
+    printErr(APP_NAME + ": " + message);
+}
+
+# The name of the backup of `path` for `suffix`: `path` + suffix, or, when
+# the suffix contains `*`, the suffix with each `*` replaced by `path`.
+pub func backup_name(path: string, suffix: string): string {
+    if (suffix.index_of("*") < 0) {
+        return path + suffix;
+    }
+    return suffix.split("*").join(path);
+}
+
+# The directory part of `path` ("" when it has none).
+func directory_of(path: string): string {
+    var cut = -1;
+    var i = 0;
+    for (ch in path) {
+        if (ch == "/") {
+            cut = i;
+        }
+        i += 1;
+    }
+    return if (cut > 0) { path.slice(0, cut) } else { "" };
+}
+
+# Reads -f files and numbers -e pieces. Returns false (after reporting)
+# when a script file cannot be opened.
+func collect_sources(opts: Options, edits out: list[Source]): bool {
+    var expression = 0;
+    for (piece in opts.pieces) {
+        if (!piece.from_file) {
+            expression += 1;
+            out.push(Source(piece.value, "", expression));
+            continue;
+        }
+        let path = piece.value;
+        if (path == "-") {
+            out.push(Source(readText("/dev/stdin"), path, 0));
+            continue;
+        }
+        if (!exists(path)) {
+            complain("couldn't open file " + path + ": No such file or directory");
+            return false;
+        }
+        if (isDir(path)) {
+            complain("couldn't open file " + path + ": Is a directory");
+            return false;
+        }
+        var text = readText(path);
+        if (text.endsWith("\n")) {
+            text = text.slice(0, text.len() - 1);
+        }
+        out.push(Source(text, path, 0));
+    }
+    return true;
+}
+
+func edit_in_place(program: Program, opts: Options, quiet: bool): int {
+    if (opts.files.len() == 0) {
+        complain("no input files");
+        return EXIT_PANIC;
+    }
+    var status = EXIT_OK;
+    for (path in opts.files) {
+        if (path == "-" or (exists(path) and isDir(path))) {
+            complain("couldn't edit " + path + ": not a regular file");
+            return EXIT_PANIC;
+        }
+        if (!exists(path)) {
+            complain("can't read " + path + ": No such file or directory");
+            status = EXIT_BAD_INPUT;
+            continue;
+        }
+        let backup = backup_name(path, opts.suffix);
+        let backup_dir = directory_of(backup);
+        if (opts.suffix != "" and backup_dir != "" and !isDir(backup_dir)) {
+            complain("cannot rename " + path + ": No such file or directory");
+            return EXIT_PANIC;
+        }
+        let original = readText(path);
+        let input = Input();
+        safe {
+            input.add_text(original);
+        }
+        let m = Machine(program, quiet);
+        safe {
+            m.run(input);
+        }
+        if (m.error != "") {
+            complain(m.error);
+            return m.exit_code;
+        }
+        if (opts.suffix != "") {
+            writeText(backup, original);
+        }
+        writeText(path, m.output());
+        if (m.quit) {
+            return m.exit_code;
+        }
+    }
+    return status;
+}
+
+pub func run_sed(opts: Options): int {
+    var sources: list[Source] = [];
+    if (!collect_sources(opts, edits: sources)) {
+        return EXIT_PANIC;
+    }
+    let parsed = parse_script(sources, opts.extended);
+    if (parsed.is_err()) {
+        complain(parsed.unwrap_err());
+        return EXIT_BAD_USAGE;
+    }
+    let program = parsed.unwrap();
+    let quiet = opts.quiet or program.quiet;
+    if (opts.in_place) {
+        return edit_in_place(program, opts, quiet);
+    }
+
+    # One continuous stream: read every input first, so `$` is known.
+    let input = Input();
+    var status = EXIT_OK;
+    var stop = "";
+    let files = if (opts.files.len() == 0) { ["-"] } else { opts.files };
+    for (path in files) {
+        if (path == "-") {
+            safe {
+                input.add_text(readText("/dev/stdin"));
+            }
+            continue;
+        }
+        # Native builds cannot catch a failed read, so check first.
+        if (!exists(path)) {
+            complain("can't read " + path + ": No such file or directory");
+            status = EXIT_BAD_INPUT;
+            continue;
+        }
+        if (isDir(path)) {
+            stop = "read error on " + path + ": Is a directory";
+            break;
+        }
+        safe {
+            input.add_text(readText(path));
+        }
+    }
+
+    let m = Machine(program, quiet);
+    safe {
+        m.run(input);
+    }
+    print(m.output());
+    if (m.error != "") {
+        complain(m.error);
+        return m.exit_code;
+    }
+    if (stop != "") {
+        complain(stop);
+        return EXIT_PANIC;
+    }
+    if (m.quit and m.exit_code != 0) {
+        return m.exit_code;
+    }
+    return status;
+}
