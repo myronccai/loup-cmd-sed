@@ -281,9 +281,10 @@ pub class Machine {
             let is_last = i == n - 1;
             var appends: list[string] = [];
             var autoprint = !this.quiet;
-            var end_cycle = false;
             var pc = 0;
-            while (pc < program.len() and !end_cycle) {
+            # One pass of the script over the line. `d`, `q` and `c` end it
+            # early with `break cycle`; the output step below runs either way.
+            cycle: while (pc < program.len()) {
                 let ins = program[pc];
                 if (!this.selects(pc, ins, ps, is_last)) {
                     let end = block_end(ins.command);
@@ -299,7 +300,7 @@ pub class Machine {
                     },
                     Command.Delete => {
                         autoprint = false;
-                        end_cycle = true;
+                        break cycle;
                     },
                     Command.Print => {
                         this.emit_line(ps);
@@ -307,7 +308,7 @@ pub class Machine {
                     Command.Quit(status) => {
                         this.exit_code = status;
                         this.quit = true;
-                        end_cycle = true;
+                        break cycle;
                     },
                     Command.LineNumber => {
                         this.emit_text(str(this.line_number) + "\n");
@@ -325,7 +326,7 @@ pub class Machine {
                             this.emit_text(text);
                         }
                         autoprint = false;
-                        end_cycle = true;
+                        break cycle;
                     },
                     Command.BlockStart(end) => {},
                     Command.BlockEnd => {},

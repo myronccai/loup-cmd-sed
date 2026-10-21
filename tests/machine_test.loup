@@ -113,3 +113,12 @@ func test_no_previous_regex_at_run_time(): void {
     expectEq(m.error, "-e expression #1, char 0: no previous regular expression", "message");
     expectEq(m.exit_code, 1, "status");
 }
+
+# `d`, `q` and `c` end the cycle: the commands after them do not run on
+# that line, but the output step (autoprint for `q`, `a` text) still does.
+func test_cycle_ends_early(): void {
+    expectEq(sed("/b/d;s/./X/", "a\nb\nc\n", false), "X\nX\n", "d skips the rest");
+    expectEq(sed("2q;s/./X/", "a\nb\nc\n", false), "X\nb\n", "q prints the line as it is");
+    expectEq(sed("2c\\\nnew\ns/./X/", "a\nb\nc\n", false), "X\nnew\nX\n", "c replaces the line");
+    expectEq(sed("a\\\nafter\nd", "a\n", false), "after\n", "text queued by a before d is kept");
+}

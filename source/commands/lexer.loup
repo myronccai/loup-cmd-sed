@@ -163,7 +163,7 @@ pub class Cursor {
     # DELIM; in a regex `\n` becomes a newline and a bracket expression may
     # contain the delimiter; other escapes are kept for the next stage.
     # None when the script ends or a line ends first.
-    pub modifier func delimited(delim: string, regex: bool): Option[string] {
+    pub modifier func delimited(delim: string, regex: bool): string? {
         var out = "";
         while (true) {
             let c = this.next();
@@ -200,7 +200,7 @@ pub class Cursor {
 
     # The rest of a bracket expression after its `[`, through the closing
     # `]`, unchanged.
-    modifier func bracket(): Option[string] {
+    modifier func bracket(): string? {
         var out = "";
         if (this.peek() == "^") {
             out += this.next();

@@ -495,7 +495,7 @@ class Parser {
             this.command();
         }
         if (this.open_blocks.len() > 0) {
-            let at = this.open_positions[this.open_positions.len() - 1] - 1;
+            let at = this.open_positions[-1] - 1;
             throw ScriptError(this.cursor.location_of_piece(at) + ": unmatched `{'");
         }
     }

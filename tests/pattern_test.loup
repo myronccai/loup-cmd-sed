@@ -9,7 +9,7 @@
 
 from debug.assert import (expect, expectEq);
 from system.regex import (Regex);
-from commands.pattern import (translate, BACKREF_MESSAGE);
+from commands.pattern import (translate, class_ranges, BACKREF_MESSAGE);
 
 func bre(p: string): string {
     return translate(p, false, false).unwrap().source;
@@ -40,4 +40,15 @@ func test_bre_and_ere_rules(): void {
 func test_errors(): void {
     expectEq(translate("a\\(", false, false).unwrap_err(), "Unmatched ( or \\(", "group");
     expectEq(translate("\\(a\\)\\1", false, false).unwrap_err(), BACKREF_MESSAGE, "back-reference");
+}
+
+func test_class_ranges(): void {
+    expectEq(class_ranges("digit", false).len(), 1, "one range");
+    expectEq(class_ranges("upper", false).len(), 1, "upper alone");
+    expectEq(class_ranges("upper", true).len(), 2, "upper means both cases with I");
+    expectEq(class_ranges("nope", false).len(), 0, "unknown");
+    expect(Regex(bre("a[[:space:]]b")).isMatch("a\tb"), "space takes a tab");
+    expect(Regex(bre("[[:punct:]]")).isMatch("x~"), "punct");
+    expect(!Regex(bre("^[[:alnum:]]*$")).isMatch("a-b"), "alnum refuses -");
+    expect(Regex(translate("^[[:lower:]]$", false, true).unwrap().source).isMatch("Q"), "lower with I");
 }

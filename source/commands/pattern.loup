@@ -131,45 +131,48 @@ pub func literal(c: int, icase: bool): string {
     return escape_code(c);
 }
 
-# The ASCII ranges of a POSIX class as lo,hi pairs, or [] for an unknown name.
-pub func class_ranges(name: string, icase: bool): list[int] {
-    if (name == "alpha") {
-        return [65, 90, 97, 122];
+# The ASCII ranges of a POSIX class as (lo, hi) code points, or [] for an
+# unknown name. With `icase`, upper and lower mean both cases.
+pub func class_ranges(name: string, icase: bool): list[(int, int)] {
+    let letters: list[(int, int)] = [(65, 90), (97, 122)];
+    if (name == "alpha" or (icase and (name == "upper" or name == "lower"))) {
+        return letters;
     }
     if (name == "digit") {
-        return [48, 57];
+        return [(48, 57)];
     }
     if (name == "alnum") {
-        return [48, 57, 65, 90, 97, 122];
+        return [(48, 57), (65, 90), (97, 122)];
     }
     if (name == "upper") {
-        return if (icase) { [65, 90, 97, 122] } else { [65, 90] };
+        return [(65, 90)];
     }
     if (name == "lower") {
-        return if (icase) { [65, 90, 97, 122] } else { [97, 122] };
+        return [(97, 122)];
     }
     if (name == "space") {
-        return [9, 13, 32, 32];
+        return [(9, 13), (32, 32)];
     }
     if (name == "blank") {
-        return [9, 9, 32, 32];
+        return [(9, 9), (32, 32)];
     }
     if (name == "punct") {
-        return [33, 47, 58, 64, 91, 96, 123, 126];
+        return [(33, 47), (58, 64), (91, 96), (123, 126)];
     }
     if (name == "print") {
-        return [32, 126];
+        return [(32, 126)];
     }
     if (name == "graph") {
-        return [33, 126];
+        return [(33, 126)];
     }
     if (name == "cntrl") {
-        return [0, 31, 127, 127];
+        return [(0, 31), (127, 127)];
     }
     if (name == "xdigit") {
-        return [48, 57, 65, 70, 97, 102];
+        return [(48, 57), (65, 70), (97, 102)];
     }
-    return [];
+    let none: list[(int, int)] = [];
+    return none;
 }
 
 func range_text(lo: int, hi: int): string {
@@ -535,10 +538,8 @@ class Translator {
                         this.fail("Invalid character class name");
                         return;
                     }
-                    var r = 0;
-                    while (r < ranges.len()) {
-                        members += range_text(ranges[r], ranges[r + 1]);
-                        r += 2;
+                    for ((lo, hi) in ranges) {
+                        members += range_text(lo, hi);
                     }
                     continue;
                 }
