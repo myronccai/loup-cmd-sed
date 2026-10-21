@@ -4,8 +4,17 @@
 # anywhere before `--`, short options combine (`-nE`), `-e` and `-f` take the
 # rest of their word or the next argument, `-i` takes only an attached
 # suffix (`-i.bak`; so `-in` means suffix "n"), and long options accept
-# unambiguous prefixes. `tokenize` turns argv into `Arg` values and
-# `parse_args` folds them into `Options`.
+# unambiguous prefixes.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/args_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: two passes. `tokenize` turns argv into `Arg` values (an option
+# with its value, an operand, or one `Bad` that ends the list), so that
+# getopt's word-splitting rules live in one place; `parse_args` then folds
+# the tokens into `Options` and takes the first operand as the script when
+# no -e or -f was given.
 
 # One -e text or -f file name, in command-line order.
 pub class ScriptPiece {

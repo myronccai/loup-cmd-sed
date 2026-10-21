@@ -4,6 +4,15 @@
 # runs it. Records are classes because they cross module boundaries (see
 # AGENTS.md); the variants are enums, and the interpreter dispatches on them
 # with `match`.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code.
+#
+# Structure: a Program is a flat list of Instructions plus side tables.
+# Commands refer to regexes, substitutions and transliterations by index
+# into those tables, so a Command carries only ints and strings, and a `{`
+# block is a BlockStart holding the index of its BlockEnd, so the machine
+# can jump over a block whose address does not select the line.
 
 from system.regex import (Regex);
 

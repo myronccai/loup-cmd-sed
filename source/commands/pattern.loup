@@ -7,6 +7,19 @@
 # construct is rewritten explicitly. Copied from loup-cmd-grep and adapted:
 # groups capture (for \1 in replacements), `\t` and friends are control
 # characters, and `.` also matches a newline in the pattern space.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/pattern_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: code-point helpers (escape_code, literal, other_case), then the
+# POSIX class and interval helpers (class_ranges, range_member,
+# parse_interval), then the Translator: one left-to-right pass over the
+# pattern's code points that appends translated pieces, each tagged with a
+# kind (ATOM, QUANTIFIED, ANCHOR, OPEN, ALT). The kind of the previous piece
+# decides whether a following `*`, `^` or `$` is an operator or a literal,
+# and a closed group is collapsed into one ATOM so that a quantifier after
+# it repeats the whole group. translate() is the entry point.
 
 pub const BACKREF_MESSAGE: string = "back-references (\\1 to \\9) in regular expressions are not supported";
 const BRACKET_MESSAGE: string = "Unmatched [, [^, [:, [., or [=";
@@ -427,6 +440,11 @@ class Translator {
         }
     }
 
+    # An escape. The pattern is held as code points, so the cases test
+    # numbers: 40 ( 41 ) 124 | 123 { 43 + 63 ? (operators only when escaped
+    # in a BRE), 49-57 the digits 1-9, 60 < 62 > 98 b 66 B (word anchors),
+    # 119 w 87 W 115 s 83 S (classes), 110 n 116 t 114 r 102 f 118 v 97 a
+    # (control characters), 96 ` and 39 ' (buffer anchors).
     modifier func backslash(): void {
         if (this.at_end()) {
             this.fail("Trailing backslash");
@@ -556,6 +574,9 @@ class Translator {
         this.add("[" + neg + members + "]", ATOM);
     }
 
+    # The main loop, one code point at a time: 92 \ 91 [ 46 . 42 * 94 ^ 36 $,
+    # and in an ERE 40 ( 41 ) 124 | 43 + 63 ? 123 {. Anything else is a
+    # literal. The first error stops the loop.
     pub modifier func run(): string {
         while (this.err == "" and !this.at_end()) {
             let c = this.codes[this.pos];

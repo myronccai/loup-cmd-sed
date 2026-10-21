@@ -4,6 +4,17 @@
 # the program's instructions whose addresses select the line, then prints
 # the pattern space (unless -n) and the text queued by `a`. Output is
 # collected as a list of pieces; only run_sed prints it.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/machine_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: Input splits the text into lines and remembers which ones ended
+# with a newline. Machine.run is the cycle loop: a program counter walks the
+# instructions, selects() decides whether each one applies to the line (and
+# keeps the per-instruction range state in `active`), an unselected `{`
+# jumps past its `}`, and the command arms update the pattern space or the
+# output. A failure stops the run and leaves its message in `error`.
 
 from system.regex import (Regex, Match);
 from commands.program import (Address, Command, ReplPart, Instruction, Substitution, Transliteration, Program, LAST_REGEX, is_missing);
@@ -130,7 +141,11 @@ pub class Machine {
     }
 
     # Whether instruction `pc` applies to the current line, updating its
-    # range state.
+    # range state. A range A,B is inactive until A matches; that line is
+    # selected and, as in GNU sed, B is checked on it only when B is a line
+    # number or `$` (a line number not after the current line ends the range
+    # at once). While active every line is selected, and the line where B
+    # matches is the last one.
     modifier func selects(pc: int, ins: Instruction, ps: string, is_last: bool): bool {
         var hit = false;
         if (is_missing(ins.addr2)) {

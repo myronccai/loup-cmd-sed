@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# Unit tests for sed's command-line parsing (source/cli/args.loup): script
+# and file operands, -e/-f order, option permutation and prefixes, -i
+# suffixes and usage errors.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from cli.args import (Options, ArgError, parse_args, tokenize, find_long);
 

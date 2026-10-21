@@ -5,6 +5,17 @@
 # the command letter, then the command's arguments. Errors are thrown as
 # ScriptError with GNU's location and message, and parse_script returns
 # them as Err.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/parser_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: escape helpers for the arguments (control, unescape_text for
+# `a`/`i`/`c`, y_chars, parse_replacement for `s`); the Parser class, a
+# recursive-descent reader whose command() reads addresses and `!` and then
+# dispatches on the command letter to the methods for arguments
+# (text_argument, substitute, transliterate); and parse_script, which runs a
+# Parser and turns its ScriptError into Err.
 
 from system.regex import (Regex);
 from commands.lexer import (Source, Cursor);
@@ -142,7 +153,7 @@ class Parser {
     let cursor: Cursor;
     let extended: bool;
     pub let program: Program;
-    var group_counts: list[int] = [];
+    var group_counts: list[int] = [];     # groups per regex, to check \N
     var open_blocks: list[int] = [];      # instruction index of each open `{`
     var open_positions: list[int] = [];   # cursor position of each open `{`
 
@@ -227,6 +238,10 @@ class Parser {
     }
 
     # The text argument of `a`, `i` and `c`, in GNU's one-line or `\` form.
+    # `a\` then a newline starts the text on the next line; `a\text` and
+    # `a text` start it here. Inside the text a backslash keeps the next
+    # character with it (so backslash-newline continues the text), and the
+    # first unescaped newline ends it; unescape_text resolves the escapes.
     safe modifier func text_argument(): string {
         this.cursor.skip_blanks();
         var c = this.cursor.peek();
@@ -399,6 +414,9 @@ class Parser {
             this.fail("invalid usage of line address 0");
         }
 
+        # A `{` goes in with no end yet and its index on the open_blocks
+        # stack; the matching `}` pops it and patches BlockStart.end, which
+        # the machine uses to jump over a block that does not apply.
         if (c == "{") {
             this.open_blocks.push(this.program.instructions.len());
             this.open_positions.push(this.cursor.pos);

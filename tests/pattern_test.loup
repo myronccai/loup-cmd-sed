@@ -1,5 +1,12 @@
 @mode(host.dual)
 
+# Unit tests for the BRE and ERE translation (source/commands/pattern.loup):
+# sed's escapes and `.`, BRE versus ERE rules, case folding and errors.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from system.regex import (Regex);
 from commands.pattern import (translate, BACKREF_MESSAGE);

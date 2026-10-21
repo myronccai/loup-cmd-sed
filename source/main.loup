@@ -1,7 +1,13 @@
 @mode(host.dual)
 
-# Entry point. Keep this file thin: all behaviour lives in cli.app.run so
-# that tests can call it with an argument list.
+# sed: entry point of the Loup recreation of GNU sed. Keep this file thin:
+# all behaviour lives in cli.app.run so that tests can call it with an
+# argument list.
+#
+# Runtime: host.dual. The entry point: main() gets the command line. The same
+# source runs two ways: `loup run source/main.loup` (`make run`) interprets
+# it in the scripted runtime, and `make build` compiles it with the rest of
+# source/ into the native binary build/sed, which `make e2e` then tests.
 
 from cli.app import (run);
 

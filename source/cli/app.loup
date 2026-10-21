@@ -1,5 +1,12 @@
 @mode(host.dual)
 
+# The command-line driver of sed: parses argv, answers --help and --version,
+# runs the editor and turns the outcome into GNU sed's exit status.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/app_test.loup calls run() directly under Stage0 (`make test`).
+
 from appinfo import (APP_NAME, EXIT_OK, EXIT_BAD_USAGE, EXIT_PANIC);
 from cli.args import (parse_args);
 from cli.usage import (usage, version_line);

@@ -1,7 +1,12 @@
 @mode(host.dual)
 
-# Exit statuses of the whole command line. These tests print the program's
-# normal output and messages.
+# Tests for sed's exit statuses, through cli.app.run with whole command
+# lines. These tests print the program's normal output and messages, and
+# read tests/fixtures/, so run them from the repository root.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
 
 from debug.assert import (expectEq);
 from appinfo import (EXIT_OK, EXIT_BAD_USAGE, EXIT_BAD_INPUT, EXIT_PANIC);

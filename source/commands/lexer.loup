@@ -6,6 +6,10 @@
 # and which character or line of it was last consumed, which gives GNU's
 # error locations, and it reads the delimited arguments of `/RE/`, `s` and
 # `y`.
+#
+# Runtime: host.dual. Compiled into the native binary build/sed by
+# `make build`; `loup run source/main.loup` interprets the same code, and
+# tests/lexer_test.loup exercises it under Stage0 (`make test`).
 
 # One piece of the script: an -e text (`file` empty, `number` = its -e
 # expression number) or the contents of an -f file.
