@@ -86,6 +86,10 @@ check "d"                  0 $'one\nthree\n'                      2d lines.txt
 check "="                  0 $'1\none\n2\ntwo\n3\nthree\n'        = lines.txt
 check "q"                  0 $'1\n2\n'                            2q "$N"
 check "q status"           5 $'1\n2\n'                            2q5 "$N"
+check "d ends the cycle"    0 $'X\nX\n'                            '/two/d;s/.*/X/' lines.txt
+check "q ends the cycle"    0 $'X\ntwo\n'                          '2q;s/.*/X/' lines.txt
+check "c ends the cycle"    0 $'X\nC\nX\n'                         '2c C
+s/.*/X/' lines.txt
 check "\$= over two files" 0 $'8\n'                               -n '$=' text.txt lines.txt
 check "\$!d"               0 $'12\n'                              '$!d' "$N"
 check "comment and ;"      0 $'two\n'                             -n '# note
@@ -102,6 +106,8 @@ check "range restarts"     0 $'2\n3\n4\n5\n12\n'                      -n '/[24]/
 check "to \$"              0 $'11\n12\n'                          -n '11,$p' "$N"
 check "negation"           0 $'1\n5\n'                            -n '2,4!p;5q' "$N"
 check "I flag"             0 $'hello world\nHello again\n'        -n '/^hello/Ip' text.txt
+check "classes"            0 $'Hello again\n'                      -n '/^[[:upper:]][[:lower:]]*[[:space:]]/p' text.txt
+check "class with I"       0 $'hello world\nHello again\n'        -n '/^[[:upper:]]ello/Ip' text.txt
 check "custom delimiter"   0 $'foo bar\n'                         -n '\,f/*o,p' text.txt
 check "empty regex"        0 $'hell0 w0rld\nf00 bar\nHell0 again\n'                         -n '/o/s//0/gp' text.txt
 check "blocks"             0 $'3\n=5\n'                           -n '2,6{/[35]/{/5/s/^/=/;p}}' "$N"
